@@ -1,0 +1,19 @@
+# Ignore MacOS files
+.DS_Store
+~$*
+
+# Ignore R data files
+*.RData
+*.rds
+
+# Ignore R history files
+.Rhistory
+.Rapp.history
+
+# Ignore temporary files
+*.tmp
+*.swp
+
+# renv infrastructure (keep lockfile + activate.R tracked, ignore libs)
+renv/library/
+renv/staging/

@@ -1,0 +1,2769 @@
+---
+title: "10x of foreign Ag specific Tconv and Treg in T1D"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    number_sections: true
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, echo=FALSE, message=FALSE, warning=FALSE}
+# Author: Thomas H. Edwards
+# Collaborators: Karen Cerosaletti, Janice Chen, Alex Hu, Matt Dufort, Hannah DeBerg
+
+setwd("/Users/tedwards/Documents/projects/P589-1_Cerosaletti_Chen_foreign_autoreactive_CD4_Tcell_10X")
+
+library(knitr)
+library(dplyr)
+library(tibble)
+library(ggplot2)
+library(GGally)
+theme_set(
+  theme_bw(20) +
+    theme(panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank(),
+      panel.border = element_rect(colour = "black", fill = NA, size = 1),
+      axis.text = element_text(colour = "black"),
+      axis.ticks = element_line(colour = "black"),
+      legend.key = element_blank(),
+      strip.text.x = element_text(size = 14, margin = margin(b = 2, t = 2)),
+      strip.background = element_rect(fill = "white", colour = "black")))
+
+library(ggthemes)
+library(ggforce)
+library(ggbeeswarm)
+library(ggvenn)
+library(viridis)
+library(stringr)
+library(readxl)
+library(openxlsx)
+library(kableExtra)
+library(RColorBrewer)
+library(plotly)
+library(tidyr)
+library(gtools)
+library(data.table)
+library(miscHelpers)
+library(tcrGraph)
+library(edgeR)
+library(limma)
+library(ggrepel)
+library(ComplexHeatmap)
+library(egg) # For ggarrange
+library(ggpubr) # Also for ggarrange
+library(umap)
+library(igraph)
+library(forcats)
+library(Seurat)
+library(apird)
+library(randomcoloR)
+library(rcartocolor)
+library(paletteer)
+library(circlize)
+library(gridExtra)
+library(ggpointdensity)
+library(cowplot)
+library(clusterSim) # for cluster-evaluation metrics
+library(foreach) # for parallel for-loops
+library(TCRtools) # for making circos plots with Matt D's code
+library(scDEED)
+library(dsb)
+library(monocle3)
+library(rstatix)
+library(SeuratData)
+library(SeuratWrappers)
+library(magrittr)
+library(purrr)
+library(msigdbr)
+library(clusterProfiler)
+library(enrichplot)
+library(patchwork)
+library(alphahull) # for boundary curves around clusters
+library(MASS) # for contour plots with density (provides kernal)
+library(ggh4x)
+library(readr)
+opts_chunk$set(fig.width = 6, fig.height = 4.0, cache = TRUE, echo = FALSE, warning = FALSE, message = FALSE, cache.lazy = FALSE, results = "hide")
+opts_knit$set(root.dir = "/Users/tedwards/Documents/projects/P589-1_Cerosaletti_Chen_foreign_autoreactive_CD4_Tcell_10X")
+
+options(stringsAsFactors = FALSE)
+
+options(future.globals.maxSize = 1591289600)
+```
+
+```{r setUpDirectories, cache = TRUE}
+baseDir <- "/Users/tedwards/Documents/projects/P589-1_Cerosaletti_Chen_foreign_autoreactive_CD4_Tcell_10X"
+dataInputDir <- file.path(baseDir, "data/input")
+plotDir <- file.path(baseDir, "figures")
+dataOutputDir <- file.path(baseDir, "data/output")
+dataDate <- "2025-08-15"
+filenameSuffix <- paste0("P589-1_autoreactive_CD4_Tcell_10X.", dataDate, "_")
+
+P589_1Samples <- c("pool589-1_1",
+  "pool589-1_2")
+# /mnt/bioinformatics/pipeline/Illumina/240604_VH01513_10_222337NNX/Project_P589-1Processed_bri_240605/
+P589_1Files <- paste0("/Volumes/Bioinformatics/pipeline/Illumina/240604_VH01513_10_222337NNX/Project_P589-1Processed_bri_240605/",
+  P589_1Samples,
+  "/outs/per_sample_outs/",
+  P589_1Samples,
+  "/count/sample_filtered_feature_bc_matrix.h5")
+
+P589_1RawFiles <- paste0("/Volumes/Bioinformatics/pipeline/Illumina/240604_VH01513_10_222337NNX/Project_P589-1Processed_bri_240605/",
+  P589_1Samples,
+  "/outs/multi/count/",
+  "raw_feature_bc_matrix.h5")
+
+poolOrder <- c("1", "2")
+```
+
+```{r setupFunctions}
+optimizeRNAseqClustering <- function(seuratObject,
+                                     hyperParamGridPCA.df,
+                                     min.dist.vector,
+                                     n_neighbors.vector,
+                                     maxNClusters = 10,
+                                     minNClusters = 2) {
+  # ------------------------------------------------INPUTS------------------------------------------------
+  # seuratObject is... a seurat object
+  # hyperParamGridPCA.df is an expanded grid for a full grid search for PCA clustering. type: dataframe
+  # hyperParamGridUMAP.list is a list (of lists) of UMAP hyperparameters. type: list
+  # min.dist.vector is a vector of min.dist values to pass to UMAP (via scDEED())
+  # n_neighbors.vector is a vector of n_neighbors values to pass to UMAP (via scDEED())
+  # maxNClusters is the maximum number of clusters to be considered (will evaluate 2 through maxNClusters)
+  #-------------------------------------------------------------------------------------------------------
+
+  #----------------------------------------------OUTPUTS--------------------------------------------------
+  # result contains $hyperParamGridOptClusterAndUMAP.df and $hyperParamGridClusterOnly.df
+  #   Extract like:
+  #     hyperParamGridOptClusterAndUMAP.df <- result$hyperParamGridOptClusterAndUMAP.df (smaller output with opt PCA clustering and UMAP embedding params)
+  #     hyperParamGridClusterOnly.df <- result$hyperParamGridClusterOnly.df (larger output with full PCA clustering gridsearch and results)
+  #--------------------------------------------------------------------------------------------------------
+
+  #-----------------------------------------REQUIRED PACKAGES----------------------------------------------
+  # Seurat, parallel, doParallel, foreach, clusterSim, cluster, dplyr, scDEED, stringr
+  #--------------------------------------------------------------------------------------------------------
+
+  # STEP 1: grid search over FindNeighbors() and FindClusters() hyperparameters to find
+  # the best combinations for each nClusters obtained
+
+  # detect nuymber of cores, leave one available for the machine to do other things
+  nCores <- parallel::detectCores() - 1
+
+  # create the cluster for parallel computation
+  myCluster <- parallel::makeCluster(
+    nCores,
+    type = "FORK"
+  )
+
+  # register it to be used by %dopar%
+  doParallel::registerDoParallel(cl = myCluster)
+
+  # Hyperparameter grid search
+  clusteringMetrics <- foreach(
+    findNeighborsDim = hyperParamGridPCA.df$findNeighborsDim,
+    findClustersRes = hyperParamGridPCA.df$findClustersRes,
+    .combine = "cbind"
+  ) %dopar% {
+    # do the UMAP clustering on the Seurat object
+    set.seed(6022)
+    seuratObject <- FindNeighbors(seuratObject, dims = 1:findNeighborsDim, verbose = FALSE)
+    seuratObject <- FindClusters(seuratObject, resolution = findClustersRes, verbose = FALSE)
+
+    # extract the cluster information
+    metaData.df <- seuratObject@meta.data
+
+    # Extract PCA embeddings
+    pcaEmbeddings <- seuratObject@reductions$pca@cell.embeddings
+
+    clusterMat <- pcaEmbeddings
+    clusterVect <- as.numeric(metaData.df$seurat_clusters)
+    nClusters <- dim(table(metaData.df$seurat_clusters))
+
+    # calculate clustering metrics
+    daviesBouldinIdx <- index.DB(clusterMat, clusterVect)
+    calinskiHarabasz <- index.G1(clusterMat, clusterVect)
+    silScore <- silhouette(clusterVect, dist(clusterMat))
+    if (anyNA(silScore)) { # this is gross and clumsy, but hey, we'll fix it later
+      medianSilScore <- NaN
+    } else {
+      silScoreSummary <- summary(silScore)
+      medianSilScore <- silScoreSummary$si.summary["Median"]
+    }
+
+    clusteringMetrics <- c("nClusters" = nClusters,
+      "DBIndex" = daviesBouldinIdx$DB,
+      "CHMetric" = calinskiHarabasz,
+      "medianSilScore" = medianSilScore)
+    return(clusteringMetrics)
+  }
+
+  # transpose the result
+  clusteringMetrics <- t(clusteringMetrics)
+
+  # adding the prediction error column
+  hyperParamGridPCA.df$DBIndex <- clusteringMetrics[, "DBIndex"]
+  hyperParamGridPCA.df$CHMetric <- clusteringMetrics[, "CHMetric"]
+  hyperParamGridPCA.df$medianSilScore <- clusteringMetrics[, "medianSilScore"]
+  hyperParamGridPCA.df$nClusters <- clusteringMetrics[, "nClusters"]
+
+  # stop cluster after we're done
+  parallel::stopCluster(cl = myCluster)
+
+  # scale the clustering metrics to fall between 0 and 1
+  hyperParamGridPCA.df$DBIndex <- (hyperParamGridPCA.df$DBIndex - min(hyperParamGridPCA.df$DBIndex, na.rm = TRUE)) /
+    (max(hyperParamGridPCA.df$DBIndex, na.rm = TRUE) - min(hyperParamGridPCA.df$DBIndex, na.rm = TRUE))
+
+  hyperParamGridPCA.df$CHMetric <- (hyperParamGridPCA.df$CHMetric - min(hyperParamGridPCA.df$CHMetric, na.rm = TRUE)) /
+    (max(hyperParamGridPCA.df$CHMetric, na.rm = TRUE) - min(hyperParamGridPCA.df$CHMetric, na.rm = TRUE))
+
+  hyperParamGridPCA.df$medianSilScore <- (hyperParamGridPCA.df$medianSilScore - min(hyperParamGridPCA.df$medianSilScore, na.rm = TRUE)) /
+    (max(hyperParamGridPCA.df$medianSilScore, na.rm = TRUE) - min(hyperParamGridPCA.df$medianSilScore, na.rm = TRUE))
+
+  # make an inverse DB score so that it is more easily compared to the other two metrics
+  # (small DB is best, but large CH and silscore are best)
+  hyperParamGridPCA.df$DBIndexInverse <- 1 - hyperParamGridPCA.df$DBIndex
+
+  # create hyperParamGridPCA.df$meanEvalMetric, as the mean of $DBIndex, $CHMetric, $medianSilScore
+  hyperParamGridPCA.df$meanEvalMetric <- rowMeans(hyperParamGridPCA.df[, c("DBIndexInverse", "CHMetric", "medianSilScore")], na.rm = TRUE)
+
+  # sort and export (optional) the hyperparamgrid
+  hyperParamGridPCA.df <- hyperParamGridPCA.df %>%
+    arrange(nClusters, desc(meanEvalMetric))
+
+  # create a subset of hyperParamGridPCA.df with the best option for each nClusters
+  hyperParamGridOptSubset.df <- hyperParamGridPCA.df %>%
+    group_by(nClusters) %>%
+    filter(meanEvalMetric == max(meanEvalMetric)) %>%
+    ungroup()
+
+  # Pre-allocate min.dist and n_neighbors columns with NA values
+  hyperParamGridOptSubset.df$min.dist <- NA
+  hyperParamGridOptSubset.df$n_neighbors <- NA
+
+  # STEP 2: use scDEED to optimize the UMAP hyperparameters
+  # ---------------------------start of scDEED UMAP opt---------------------------------------
+  # if nrow(hyperParamGridOptSubset.df) is smaller than maxNClusters, then set maxNClusters to nrow(hyperParamGridOptSubset.df)
+  if (nrow(hyperParamGridOptSubset.df) < maxNClusters) {
+    maxNClusters <- nrow(hyperParamGridOptSubset.df)
+  }
+
+  # Loop over the rows of hyperParamGridOptSubset.df, finding the best UMAP embedding for each nClusters
+  for (i in minNClusters:maxNClusters) {
+    # Extract necessary values from hyperParamGridOptSubset.df
+    nClusters <- hyperParamGridOptSubset.df$nClusters[i]
+    numPCs <- hyperParamGridOptSubset.df$findNeighborsDim[i]
+    findClustersRes <- hyperParamGridOptSubset.df$findClustersRes[i]
+
+    set.seed(6022)
+    seuratObject <- FindNeighbors(seuratObject, dims = 1:numPCs)
+    seuratObject <- FindClusters(seuratObject, resolution = findClustersRes)
+
+    scDEEDResult <- scDEED(seuratObject, # input Seurat object (must have UMAP or t-SNE already run)
+      K = numPCs, # number of PCs
+      reduction.method = "umap", # 'umap' or 'tsne'
+      min.dist =  min.dist.vector, # scDEED default is 0.1 & 0.4; Seurat default is 0.3
+      n_neighbors = n_neighbors.vector, # scDEED defaults are c(5, 20, 30, 40, 50). Seurat default is 30.
+      similarity_percent = 0.5, # scDEECD default
+      dubious_cutoff = 0.05, # scDEED default
+      trustworthy_cutoff = 0.95) # scDEED default
+
+    # add $number_trustworthy_cells and $number_intermediate_cells to scDEEDResult
+    scDEEDResult$full_results$number_trustworthy_cells <- str_count(scDEEDResult$full_results$trustworthy_cells, ",") + 1
+    scDEEDResult$full_results$number_intermediate_cells <- str_count(scDEEDResult$full_results$intermediate_cells, ",") + 1
+
+    # utile scDEED output
+    optIdx <- which(scDEEDResult$num_dubious$number_dubious_cells == min(scDEEDResult$num_dubious$number_dubious_cells)) # find the result with the fewest 'dubiously' embedded cells
+    # min.distOpt <- scDEEDResult$num_dubious$min.dist[optIdx]
+    # n_neighborsOpt <- scDEEDResult$num_dubious$n_neighbors[optIdx]
+
+    # just output the optimal hyperparams into hyperParamGridOptSubset.df
+    hyperParamGridOptSubset.df$min.dist[i] <- scDEEDResult$num_dubious$min.dist[optIdx]
+    hyperParamGridOptSubset.df$n_neighbors[i] <- scDEEDResult$num_dubious$n_neighbors[optIdx]
+  }
+
+  # Reorder columns to place min.dist and n_neighbors after findClustersRes
+  hyperParamGridOptSubset.df <- hyperParamGridOptSubset.df %>%
+    dplyr::select(findNeighborsDim, findClustersRes, min.dist, n_neighbors, everything())
+
+  # Return the hyperparam dataframes
+  return(list(hyperParamGridOptClusterAndUMAP.df = hyperParamGridOptSubset.df, hyperParamGridClusterOnly.df = hyperParamGridPCA.df))
+}
+
+# function for saving plots as both pdf and png
+savePlot <- function(
+    plot,
+    plotDir,
+    filename,
+    height,
+    width,
+    units = "in",
+    dpi = 600,
+    formats = c("pdf", "png")
+    ) {
+  # Ensure plotDir exists
+  if (!dir.exists(plotDir)) dir.create(plotDir, recursive = TRUE)
+
+  # Save as PDF
+  if ("pdf" %in% formats) {
+    pdf(file.path(plotDir, paste0(filenameSuffix, "_", filename, ".pdf")), height = height, width = width)
+    print(plot)
+    dev.off()
+  }
+
+  # Save as PNG
+  if ("png" %in% formats) {
+    png(
+      file.path(plotDir, paste0(filenameSuffix, "_", filename, ".png")),
+      height = height,
+      width = width,
+      units = units,
+      res = dpi
+    )
+    print(plot)
+    dev.off()
+  }
+}
+
+# Remove cells with: a) 3+ alphas, b) cells with 2 alphas and 2 betas, and c) 2 betas
+# Remove iNKT and MAIT cells
+callMultiplets <- function(tcrs,
+                           nAlphaCut = 3,
+                           nBetaCut = 2,
+                           alphaAndBetaCut = 2,
+                           callINKT = TRUE,
+                           callMAIT = TRUE) {
+  # Count chains
+  chainCounts <- tcrs %>%
+    dplyr::group_by(barcode) %>%
+    dplyr::summarise(nAlpha = sum(chain ==  "TRA"),
+      nBeta = sum(chain == "TRB"))
+
+  multiplets <- chainCounts %>%
+    dplyr::filter(nAlpha > nAlphaCut |
+      nBeta > nBetaCut |
+      (nAlpha >= alphaAndBetaCut & nBeta >= alphaAndBetaCut))
+
+  tcrs$multiplet <- tcrs$barcode %in% multiplets$barcode
+
+  if (callMAIT == TRUE) {
+    tcrs <- tcrs %>%
+      dplyr::mutate(isMAIT = (str_detect(v_gene, "TRAV1-2") &
+        str_detect(j_gene, "TRAJ(33|12|20)")))
+  }
+
+  if (callINKT == TRUE) {
+    tcrs <- tcrs %>%
+      dplyr::mutate(isINKT = (str_detect(v_gene, "TRAV10") &
+        str_detect(j_gene, "TRAJ18")))
+  }
+  return(tcrs)
+}
+
+# finds all pairs of alpha/beta TCRs
+# TCRs is a dataframe that has a detected TCR chain for each row (alpha or beta or gamma, etc.) This is the output of mixcr, and maybe something analogous for 10x. But the columns might be named something different for 10x.
+# adapted from A.Hu code
+combinePairs <- function(tcrDf) {
+  a <- tcrDf[tcrDf$chain %in% c("TRA", "a"), ]
+  b <- tcrDf[tcrDf$chain %in% c("TRB", "b"), ]
+  commonbarcodes <- intersect(a$barcode, b$barcode) # get barcodes that have both an alpha or beta chain
+  a <- a[a$barcode %in% commonbarcodes, ]
+  b <- b[b$barcode %in% commonbarcodes, ]
+
+  # Compute how many alpha/beta pairs there should be
+  atab <- table(a$barcode)
+  btab <- table(b$barcode)
+  nPairs <- sum(atab[commonbarcodes] * btab[commonbarcodes])
+
+  # Initialize the pairs data frame
+  pairs <- data.frame(CDR3b = rep("", nPairs),
+    CDR3bnt = rep("", nPairs),
+    TRBV = rep("", nPairs),
+    TRBJ = rep("", nPairs),
+    CDR3a = rep("", nPairs),
+    CDR3ant = rep("", nPairs),
+    TRAV = rep("", nPairs),
+    TRAJ = rep("", nPairs),
+    barcode = rep("", nPairs),
+    fullLengthNTa = rep("", nPairs),
+    fullLengthNTb = rep("", nPairs))
+
+  # Iterate through the TCR alphas and betas and fill out the pair dataframe
+  k <- 1
+  for (barcode in commonbarcodes) {
+    arows <- which(a$barcode == barcode)
+    brows <- which(b$barcode == barcode)
+    for (i in arows) {
+      for (j in brows) {
+        pairs[k, ] <- c(b$cdr3[j],
+          b$cdr3_nt[j],
+          b$v_gene[j],
+          b$j_gene[j],
+          a$cdr3[i],
+          a$cdr3_nt[i],
+          a$v_gene[i],
+          a$j_gene[i],
+          barcode,
+          a$fullLengthNT[i],
+          b$fullLengthNT[j])
+        k <- k + 1
+      }
+    }
+  }
+  return(pairs)
+}
+```
+
+```{r read10XGEXDataFromAllFlowcells}
+gexAbObjects <- lapply(P589_1Files, Read10X_h5)
+
+gexObjects <- list(gexAbObjects[[1]]$`Gene Expression`,
+  gexAbObjects[[2]]$`Gene Expression`)
+
+abObjects <- list(gexAbObjects[[1]]$`Antibody Capture`,
+  gexAbObjects[[2]]$`Antibody Capture`)
+
+#
+pool1HT <- c("CerosalettiLab632811_CD3CD28",
+  "CerosalettiLab448473_CD3CD28",
+  "CerosalettiLab839987_CD3CD28",
+  "CerosalettiLab632811_CEFX",
+  "CerosalettiLab448473_CEFX",
+  "CerosalettiLab839987_CEFX",
+  "CerosalettiLab632811_Islet",
+  "CerosalettiLab448473_Islet",
+  "CerosalettiLab839987_Islet")
+
+pool1HTVars <- c("CerosalettiLab632811-CD3CD28",
+  "CerosalettiLab448473-CD3CD28",
+  "CerosalettiLab839987-CD3CD28",
+  "CerosalettiLab632811-CEFX",
+  "CerosalettiLab448473-CEFX",
+  "CerosalettiLab839987-CEFX",
+  "CerosalettiLab632811-Islet",
+  "CerosalettiLab448473-Islet",
+  "CerosalettiLab839987-Islet")
+
+pool2HT <- c("CerosalettiLab1464776_CD3CD28",
+  "CerosalettiLab1059994_CD3CD28",
+  "CerosalettiLab942655_CD3CD28",
+  "CerosalettiLab1464776_CEFX",
+  "CerosalettiLab1059994_CEFX",
+  "CerosalettiLab942655_CEFX",
+  "CerosalettiLab1464776_Islet",
+  "CerosalettiLab1059994_Islet",
+  "CerosalettiLab942655_Islet")
+
+pool2HTVars <- c("CerosalettiLab1464776-CD3CD28",
+  "CerosalettiLab1059994-CD3CD28",
+  "CerosalettiLab942655-CD3CD28",
+  "CerosalettiLab1464776-CEFX",
+  "CerosalettiLab1059994-CEFX",
+  "CerosalettiLab942655-CEFX",
+  "CerosalettiLab1464776-Islet",
+  "CerosalettiLab1059994-Islet",
+  "CerosalettiLab942655-Islet")
+
+# Make a list of Seurat gene expression count objects
+# Set parameters to define cells
+seuratObjects <- lapply(gexObjects,
+  function(x) CreateSeuratObject(counts = x,
+    min.features = 100,
+    min.cells = 3))
+```
+
+```{r addFBData}
+# Create a separate "FB" assay slot within the Seurat object
+# This is preferable over adding the ab data as metadata because
+# it allows for seurat's normalization routine to be run on it.
+
+# Separate hastags into a HT object assay, separate surface antibody tags into an FB (feature barcode) object assay
+for (i in 1:length(seuratObjects)) {
+  seurat <- seuratObjects[[i]]
+
+  ht <- abObjects[[i]]
+  if (i == 1) {
+    ht <- ht[c("CerosalettiLab632811_CD3CD28",
+      "CerosalettiLab448473_CD3CD28",
+      "CerosalettiLab839987_CD3CD28",
+      "CerosalettiLab632811_CEFX",
+      "CerosalettiLab448473_CEFX",
+      "CerosalettiLab839987_CEFX",
+      "CerosalettiLab632811_Islet",
+      "CerosalettiLab448473_Islet",
+      "CerosalettiLab839987_Islet"), ]
+
+  } else if (i == 2) {
+    ht <- ht[c("CerosalettiLab1464776_Islet",
+      "CerosalettiLab1464776_CEFX",
+      "CerosalettiLab1059994_Islet",
+      "CerosalettiLab1059994_CEFX",
+      "CerosalettiLab942655_Islet",
+      "CerosalettiLab942655_CEFX",
+      "CerosalettiLab1464776_CD3CD28",
+      "CerosalettiLab1059994_CD3CD28",
+      "CerosalettiLab942655_CD3CD28"), ]
+  }
+  fb <- abObjects[[i]]
+  fb <- fb[c("anti-human CD154",
+    "anti-human CD137",
+    "anti-human CD69",
+    "anti-human CD127",
+    "anti-human CD25",
+    "anti-human CD45RA",
+    "anti-human CD45RO",
+    "anti-human CCR7",
+    "Mouse IgG1, _ isotype Ctrl"), ]
+
+  keepCells <- colnames(seurat)
+
+  ht <- ht[, keepCells]
+  seurat[["HT"]] <- CreateAssayObject(ht)
+
+  fb <- fb[, keepCells]
+  seurat[["FB"]] <- CreateAssayObject(fb)
+
+  seuratObjects[[i]] <- seurat
+}
+```
+
+```{r loadGeneLists}
+# load the gene lists
+geneListsTconv.df <-
+  read.xlsx(file.path(dataInputDir, "CD4_Tconv_geneLists.xlsx")) %>%
+  data.frame()
+
+geneListTconvCurated <- geneListsTconv.df$curated
+
+geneListsTreg.df <-
+  read.xlsx(file.path(dataInputDir, "CD4_Treg_geneLists.xlsx")) %>%
+  data.frame()
+
+geneListTregCurated <- geneListsTreg.df$curated
+
+geneListsTCR.df <-
+  read.xlsx(file.path(dataInputDir, "TCR_geneList.xlsx")) %>%
+  data.frame()
+
+# read in the P390 cluster-defining genes
+geneListsP390TconvCDGenes.df <- read.table(
+  file.path(dataInputDir, "top20markers_P390Tconvs5.txt"),
+  header = TRUE,
+  sep = "\t"
+) %>% data.frame()
+
+geneListsP390TregCDGenes.df <- read.table(
+  file.path(dataInputDir, "top20markers_P390Tregs3.txt"),
+  header = TRUE,
+  sep = "\t"
+) %>% data.frame()
+```
+
+```{r loadTCRData}
+# load the data
+TCRsPool1.df <-
+  read.csv(file.path(dataInputDir, "filtered_contig_annotations_pool1.csv")) %>%
+  data.frame() %>%
+  dplyr::mutate(barcode = paste0("1_", barcode))
+
+TCRsPool2.df <-
+  read.csv(file.path(dataInputDir, "filtered_contig_annotations_pool2.csv")) %>%
+  data.frame() %>%
+  dplyr::mutate(barcode = paste0("2_", barcode))
+
+# merge the two pools
+TCRs.df <- rbind(TCRsPool1.df, TCRsPool2.df)
+
+# create a full-length nucleotide column
+TCRs.df$fullLengthNT <- paste0(TCRs.df$fwr1_nt,
+  TCRs.df$cdr1_nt,
+  TCRs.df$fwr2_nt,
+  TCRs.df$cdr2_nt,
+  TCRs.df$fwr3_nt,
+  TCRs.df$cdr3_nt,
+  TCRs.df$fwr4_nt)
+
+# create a full-length AA column
+TCRs.df$fullLengthAA <- paste(TCRs.df$v_gene, TCRs.df$cdr3, TCRs.df$j_gene, sep = "_")
+```
+
+```{r callAndCleanMultipletsFromTCRs}
+# call multiplets
+TCRs.df <- callMultiplets(TCRs.df,
+  nAlphaCut = 3, # 3 or more alpha chains is a suspected multiplet
+  nBetaCut = 2, # 2 or more beta chains is a suspected multiplet
+  alphaAndBetaCut = 2, # 2 alpha and beta chains is considered a multiplet (redundant in this case with nBetacut, but in some cases we might want more flexibility)
+  callINKT = TRUE,
+  callMAIT = TRUE)
+
+# TCR chains to exclude:
+# # 77 MAIT
+# # 153 MAIT
+# # 4260 multiplets
+
+# for filtering the seurat object later
+barcodesToFilter <- TCRs.df$barcode[which(TCRs.df$multiplet |
+  TCRs.df$isMAIT |
+  TCRs.df$isINKT)]
+
+# remove multiplets, MAIT cells, and iNKT cells
+cleanTCRs.df <- TCRs.df %>%
+  dplyr::filter(!multiplet) %>%
+  dplyr::filter(!isMAIT) %>%
+  dplyr::filter(!isINKT)
+```
+
+```{r alexHuCallPairsCode}
+# finds all pairs of alpha/beta TCRs
+cleanTCRpairs.df <- combinePairs(cleanTCRs.df)
+
+# create $fullLengthNT that concatenates $fullLengthNTa and $fullLengthNTb
+cleanTCRpairs.df$fullLengthNT <- paste0(cleanTCRpairs.df$fullLengthNTa, cleanTCRpairs.df$fullLengthNTb)
+
+# check for cells with 2 alpha chains that have different fullLengthNTa, but the same CDR3a
+cat("Checking for potential sequencing errors: same CDR3a but different fullLengthNTa within the same cell...\n")
+
+# Find cases where the same barcode has the same CDR3a but different fullLengthNTa
+potentialSequencingErrors.df <- cleanTCRpairs.df %>%
+  dplyr::filter(!is.na(CDR3a) & !is.na(fullLengthNTa)) %>%
+  dplyr::group_by(barcode, CDR3a) %>%
+  dplyr::summarise(
+    unique_fullLengthNTa = n_distinct(fullLengthNTa),
+    fullLengthNTa_sequences = paste(unique(fullLengthNTa), collapse = " | "),
+    count = n(),
+    .groups = "drop"
+  ) %>%
+  dplyr::filter(unique_fullLengthNTa > 1)
+
+if (nrow(potentialSequencingErrors.df) > 0) {
+  cat("Found", nrow(potentialSequencingErrors.df), "cases where the same barcode has the same CDR3a but different fullLengthNTa sequences:\n")
+  print(potentialSequencingErrors.df)
+
+  # Get detailed information about these cases
+  detailedSequencingErrors.df <- cleanTCRpairs.df %>%
+    dplyr::semi_join(potentialSequencingErrors.df, by = c("barcode", "CDR3a")) %>%
+    dplyr::arrange(barcode, CDR3a, fullLengthNTa) %>%
+    dplyr::select(barcode, CDR3a, fullLengthNTa, CDR3b, fullLengthNTb, cellType, stimulationFigures, everything())
+
+  cat("\nDetailed view of potential sequencing errors:\n")
+  print(detailedSequencingErrors.df)
+
+  # Summary statistics
+  cat("\nSummary statistics:\n")
+  cat("- Total cells affected:", length(unique(potentialSequencingErrors.df$barcode)), "\n")
+  cat("- Total CDR3a sequences affected:", length(unique(potentialSequencingErrors.df$CDR3a)), "\n")
+  cat("- Average number of different fullLengthNTa per CDR3a:", round(mean(potentialSequencingErrors.df$unique_fullLengthNTa), 2), "\n")
+
+} else {
+  cat("No cases found where the same barcode has the same CDR3a but different fullLengthNTa sequences.\n")
+}
+```
+
+```{r add_qc_metrics_anno}
+## Add % mito information, library name info
+for (i in 1:length(seuratObjects)) {
+  seurat <- seuratObjects[[i]]
+  seurat[["percent_mt"]] <- PercentageFeatureSet(seurat, pattern = "^MT-")
+  seurat[["pool"]] <- i
+  seuratObjects[[i]] <- seurat
+}
+```
+
+```{r plot_n_features, fig.height = 3, fig.width=3}
+# Select QC cutoffs
+nFeatureLow <- 1000
+nFeatureHigh <- 4500
+pctMt <- 4
+
+# Look at distributions of quality features
+nFeatureHistograms <- lapply(seuratObjects, function(x) hist(x$nFeature_RNA, 200, xlim = c(0, 5000), main = unique(x$pool), xlab = "nFeature RNA"))
+
+pdf(file.path(plotDir,
+  paste0(filenameSuffix, "_NFeatureHistograms.pdf")),
+height = 4,
+width = 10)
+
+par(mfrow = c(1, 2))
+lapply(seuratObjects, function(x) {
+  hist(x$nFeature_RNA, 50, xlim = c(0, 6000), main = unique(x$pool), xlab = "nFeature RNA")
+  abline(v = nFeatureHigh)
+  abline(v = nFeatureLow)
+})
+
+invisible(dev.off())
+```
+
+```{r plot_pct_mito, fig.height = 3, fig.width=3}
+pctMitoHistograms <- lapply(seuratObjects, function(x) hist(x$percent_mt, 50, xlim = c(0, 25), main = unique(x$pool), xlab = "% mitochondrial reads"))
+
+pdf(file.path(plotDir,
+  paste0(filenameSuffix, "_PctMitoHistograms.pdf")),
+height = 4,
+width = 10)
+
+par(mfrow = c(1, 2))
+lapply(seuratObjects, function(x) {
+  hist(x$percent_mt, 100, xlim = c(0, 25), main = unique(x$pool), xlab = "% mitochondrial reads")
+  abline(v = pctMt)
+})
+
+invisible(dev.off())
+```
+
+```{r inspect_qc_cutoffs, fig.width=8, fig.height=2}
+plotLayers <- list(geom_vline(xintercept = nFeatureLow),
+  geom_vline(xintercept = nFeatureHigh),
+  geom_hline(yintercept = pctMt),
+  labs(x = "Number of genes",
+    y = "% mito reads",
+    title = ""),
+  xlim(c(0, 7000)),
+  ylim(c(0, 50)),
+  theme(legend.position = "none"))
+
+featureScatterPlots <- lapply(seuratObjects, function(x) FeatureScatter(x,
+  feature1 = "nFeature_RNA",
+  feature2 = "percent_mt") +
+  plotLayers +
+  ggtitle(unique(x$pool)))
+
+ggpubr::ggarrange(plotlist = featureScatterPlots,
+  ncol = 2,
+  nrow = 1)
+
+pdf(file.path(plotDir,
+  paste0(filenameSuffix, "_QCscatterplots.pdf")),
+height = 6,
+width = 10)
+
+ggpubr::ggarrange(plotlist = featureScatterPlots,
+  ncol = 2,
+  nrow = 1)
+
+invisible(dev.off())
+```
+
+```{r nCountsRNA}
+rasterResolutionDpi <- 300
+
+qcMetricsThresholds <-
+  c(
+    "min_nFeature_RNA" = 250,
+    "max_nFeature_RNA" = 6000,
+    "min_nCount_RNA" = 450,
+    "max_nCount_RNA" = 35000,
+    # "nFeature_ADT" = 50,
+    # "nCount_ADT" = 500,
+    "percent_mt" = 12.5
+    # "percent_ribo" = 50,
+    # "percent_hb" = 10
+  )
+
+qcMetricsDfForPlot <-
+  data.frame(
+    metric = str_replace(names(qcMetricsThresholds), "^(min|max)_", ""),
+    threshold = unname(qcMetricsThresholds)
+  )
+
+qcMetrics.tmp <-
+  c("nFeature_RNA", "nCount_RNA",
+    # "nFeature_ADT", "nCount_ADT",
+    "percent_mt"
+    # "percent_ribo", "percent_hb")
+  )
+
+pdf(file.path(plotDir,
+  paste0(filenameSuffix, "_QCmetricplots.pdf")),
+height = 5.5,
+width = 12)
+
+plot.tmp <-
+  seuratObjects[[1]]@meta.data %>%
+  dplyr::select(all_of(qcMetrics.tmp)) %>%
+  pivot_longer(
+    cols = one_of(qcMetrics.tmp),
+    names_to = "metric", values_to = "value") %>%
+  mutate(metric = metric %>% factor(levels = qcMetrics.tmp)) %>%
+  ggplot(mapping = aes(x = "sample", y = value)) +
+  geom_violin() +
+  ggrastr::rasterise(
+    geom_jitter(size = 0.5), dpi = rasterResolutionDpi) +
+  facet_wrap(facets = vars(metric), ncol = 2, scales = "free_y") +
+  geom_hline(
+    data =
+      qcMetricsDfForPlot %>%
+        dplyr::filter(metric %in% qcMetrics.tmp) %>%
+        mutate(metric = metric %>% factor(levels = qcMetrics.tmp)),
+    mapping = aes(yintercept = threshold),
+    color = "red", linetype = "dashed") +
+  theme(
+    axis.text.x = element_blank(),
+    # axis.text.x = element_text(angle=-45, hjust=0, size = 10),
+    strip.text = element_text(size = rel(0.8), margin = margin(t = 3, b = 3))) +
+  labs(x = NULL, y = NULL)
+
+print(plot.tmp)
+
+dev.off()
+```
+
+```{r add_anno}
+annoP589_1 <- read_excel(file.path(dataInputDir, "P589-1_Final_Annotation.xlsx"),
+  "Final Annotation")
+
+# Remove duplicated columns based on their values
+annoP589_1 <- annoP589_1 %>% dplyr::select(which(!duplicated(as.list(.))))
+
+# clean up colnames
+colnames(annoP589_1) <- gsub("\\.", "", colnames(annoP589_1))
+colnames(annoP589_1) <- gsub(" ", "", colnames(annoP589_1))
+colnames(annoP589_1) <- gsub("/", "Per", colnames(annoP589_1))
+colnames(annoP589_1) <- gsub("\r\n", "", colnames(annoP589_1))
+colnames(annoP589_1) <- gsub("%", "Percent", colnames(annoP589_1))
+colnames(annoP589_1) <- gsub("#", "Num", colnames(annoP589_1))
+colnames(annoP589_1) <- gsub("-", "", colnames(annoP589_1))
+colnames(annoP589_1) <- sub("[1-9]$", "", colnames(annoP589_1))
+colnames(annoP589_1) <- gsub("\\(", "_", colnames(annoP589_1))
+colnames(annoP589_1) <- gsub("\\)", "", colnames(annoP589_1))
+colnames(annoP589_1) <- gsub("\\(", "_", colnames(annoP589_1))
+colnames(annoP589_1) <- gsub("10x", "tenx", colnames(annoP589_1))
+colnames(annoP589_1) <- sub("^([A-Z])", "\\L\\1", colnames(annoP589_1), perl = TRUE)
+
+names(annoP589_1)[names(annoP589_1) == "gateforcellcounter"] <- "gateForCellCounter"
+names(annoP589_1)[names(annoP589_1) == "libtype"] <- "libType"
+names(annoP589_1)[names(annoP589_1) == "tenxdillibQubitn"]
+
+names(annoP589_1)[names(annoP589_1) == "index_name"] <- "indexName"
+names(annoP589_1)[names(annoP589_1) == "samplelocationPlateWellPerTubeNum"] <- "sampleLocationPlateWellPerTubeNum"
+names(annoP589_1)[names(annoP589_1) == "cellCountafterWashPerResuspcellsPerul"] <- "cellCountAfterWashPerResuspcellsPerul"
+names(annoP589_1)[names(annoP589_1) == "poolratio"] <- "poolRatio"
+names(annoP589_1)[names(annoP589_1) == "datecollected"] <- "dateCollected"
+
+# Define the mapping of donor IDs to numbers
+donor_mapping <- c(
+  "CerosalettiLab1059994" = 1,
+  "CerosalettiLab1464776" = 2,
+  "CerosalettiLab448473" = 3,
+  "CerosalettiLab632811" = 4,
+  "CerosalettiLab839987" = 5,
+  "CerosalettiLab942655" = 6
+)
+
+annoP589_1$donorIdFigures <- with(annoP589_1, {
+  donor_id <- as.character(donor_mapping[donorID])
+  paste0(donor_id, "_", studyGroup)
+})
+```
+
+```{r setupPalettes}
+# Extract unique donor IDs
+unique_donor_ids <- unique(annoP589_1$donorIdFigures)
+
+# Reorder unique donor IDs to match the desired order
+desired_order <- c("2_T1D", "5_T1D", "6_T1D", "1_Control", "3_Control", "4_Control")
+unique_donor_ids <- unique_donor_ids[order(match(unique_donor_ids, desired_order))]
+
+# Ensure the number of colors matches the number of unique donor IDs
+colors <- paletteer::paletteer_d(palette = "LaCroixColoR::Lemon", n = length(unique_donor_ids))
+
+# Create named vector
+palDonorId <- setNames(colors, unique_donor_ids)
+
+# create stimulation color palette
+# palStimulation <- setNames(paletteer::paletteer_d("khroma::highcontrast", n = 3), c("Polyclonal", "IAR", "Microbial"))
+palStimulation <- setNames(paletteer::paletteer_d("PrettyCols::Bold", n = 3), c("Polyclonal", "IAR", "Microbial"))
+
+# create cellType (TotalSeq) color palette
+palCellType <- c("Treg" = "blue", "Tconv" = "red", "Other" = "gray")
+
+# create studyGroup color palette
+palStudyGroup <- c("Control" = "lightblue", "T1D" = "orange")
+
+# create pool color palette
+palPool <- c("1" = "darkgreen", "2" = "darkorange4")
+```
+
+```{r checkForTCRGenesPreQC}
+# TRA, TRB, TRGC1, TRGC2, TRDC
+# TRAV24, TRAJ18, TRAV7-2,
+# merge Seurat objects
+seuratMerged.tmp <- merge(seuratObjects[[1]],
+  y = c(seuratObjects[2]),
+  add.cell.ids = poolOrder,
+  merge.data = TRUE)
+
+# Set the default assay to RNA if not already set
+DefaultAssay(seuratMerged.tmp) <- "RNA"
+
+seuratMerged.tmp <- JoinLayers(seuratMerged.tmp, assay = "RNA")
+
+# Get the counts matrix from the "counts" slot
+counts_mat <- GetAssayData(seuratMerged.tmp, assay = "RNA", slot = "counts")
+
+# Retrieve gene names that start with "TRA", "TRB", "TRD", or "TRG"
+tcr_genes <- grep("^(TRA|TRB|TRD|TRG)", rownames(counts_mat), value = TRUE)
+
+# Print the resulting gene names
+print(tcr_genes)
+
+# Subset the matrix to the TR genes
+tcr_counts <- counts_mat[tcr_genes, ]
+
+# Calculate for each gene the number of cells with non-zero counts
+nonzero_cell_counts <- Matrix::rowSums(tcr_counts > 0)
+print(nonzero_cell_counts)
+
+# Calculate the mean and standard deviation (SD) of counts for non-zero cells
+mean_nonzero <- apply(tcr_counts, 1, function(x) {
+  v <- x[x > 0]
+  if (length(v) == 0) NA else mean(v)
+})
+sd_nonzero <- apply(tcr_counts, 1, function(x) {
+  v <- x[x > 0]
+  if (length(v) == 0) NA else sd(v)
+})
+
+# Convert the named vector to a data frame with additional columns
+nonzero_df <- data.frame(
+  Gene = names(nonzero_cell_counts),
+  Count = as.integer(nonzero_cell_counts),
+  Mean = as.numeric(mean_nonzero),
+  SD = as.numeric(sd_nonzero)
+)
+
+# Export the data frame as an Excel file in the dataOutputDir directory
+library(openxlsx)
+write.xlsx(nonzero_df, file = file.path(dataOutputDir, paste0(filenameSuffix, "nonzeroTCRGeneCounts.xlsx")))
+
+rm_tmp(ask = FALSE)
+```
+
+```{r make_qc_cuts, results = "show"}
+seuratQC <- NULL
+
+for (i in 1:length(seuratObjects)) {
+  seurat <- seuratObjects[[i]]
+
+  seuratQC[[i]] <- subset(seurat,
+    subset = nFeature_RNA > nFeatureLow & nFeature_RNA < nFeatureHigh & percent_mt < pctMt)
+}
+
+# Tally how many cells pass QC
+poolAnno <- data.frame("pool" = c("1",
+  "2"))
+
+poolAnno$nCells <- NA
+poolAnno$nCellsQC <- NA
+
+for (i in 1:length(seuratObjects)) {
+  selectedPool <- unique(seuratObjects[[i]]$pool) %>%
+    as.character()
+
+  poolAnno$nCells[poolAnno$pool == selectedPool] <- dim(seuratObjects[[i]])[2]
+
+  poolAnno$nCellsQC[poolAnno$pool == selectedPool] <- dim(seuratQC[[i]])[2]
+}
+
+poolAnno$pctPass <- round(poolAnno$nCellsQC / poolAnno$nCells * 100, 2)
+
+poolAnno %>%
+  dplyr::select(pool, nCells, nCellsQC, pctPass) %>%
+  dplyr::rename(Pool = pool,
+    `Number of cells` = nCells,
+    `Number of high quality cells` = nCellsQC,
+    `Percent of cells that pass QC` = pctPass) %>%
+  kable(row.names = F,
+    caption = "Quality analysis summary") %>%
+  kable_styling(full_width = F,
+    position = "left")
+```
+
+```{r histAndBiaxialHTPlots}
+# merge Seurat objects
+seuratQCMerged <- merge(seuratQC[[1]],
+  y = c(seuratQC[2]),
+  add.cell.ids = poolOrder,
+  merge.data = TRUE)
+
+DefaultAssay(seuratQCMerged) <- "HT"
+
+htVariables <- rownames(seuratQCMerged)
+htDF <- FetchData(seuratQCMerged,
+  vars = c(htVariables))
+
+# manually transform as log(count + 1)
+htDF <- log(htDF + 1)
+
+# Convert the data frame to a matrix
+htMatrix <- as.matrix(htDF)
+
+# Transpose htMatrix
+htMatrix <- t(htMatrix)
+
+# Get the cell names (columns) and feature names (rows) from the existing "HT" assay data
+cells <- colnames(seuratQCMerged[["HT"]]@data)
+features <- rownames(seuratQCMerged[["HT"]]@data)
+
+# Ensure the cell names (columns) and feature names (rows) in htMatrix match those in the existing "HT" assay data
+colnames(htMatrix) <- cells
+rownames(htMatrix) <- features
+
+# Overwrite the "HT" assay data with the normalized data
+seuratQCMerged[["HT"]]@data <- htMatrix
+
+png(file.path(plotDir,
+  paste0(filenameSuffix, "_Scatterplots_HTExpression.png")),
+height = 1000,
+width = 2400)
+
+ggpairs(htDF[sample(1:nrow(htDF)), ],
+  columns = 1:18,
+  aes(alpha = 0.4))
+
+invisible(dev.off())
+```
+
+```{r stephanPribitzerHTODemuxAltApproach}
+# Usually performs better for human samples than hto demux
+
+# individual cutoffs determined by examining ridgeplots of the individual hashtags (log(counts + 1))
+
+# Create a vector of cutoffs
+htCutoffs <- c("CerosalettiLab1464776-Islet" = 3.5,
+  "CerosalettiLab1464776-CEFX" = 4,
+  "CerosalettiLab1059994-Islet" = 4,
+  "CerosalettiLab1059994-CEFX" = 3.85,
+  "CerosalettiLab942655-Islet" = 4,
+  "CerosalettiLab942655-CEFX" = 4,
+  "CerosalettiLab1464776-CD3CD28" = 5,
+  "CerosalettiLab1059994-CD3CD28" = 6,
+  "CerosalettiLab942655-CD3CD28" = 5.5,
+  "CerosalettiLab632811-CD3CD28" = 6.25,
+  "CerosalettiLab448473-CD3CD28" = 7.25,
+  "CerosalettiLab839987-CD3CD28" = 6.5,
+  "CerosalettiLab632811-CEFX" = 4.25,
+  "CerosalettiLab448473-CEFX" = 3.5,
+  "CerosalettiLab839987-CEFX" = 3.5,
+  "CerosalettiLab632811-Islet" = 4.25,
+  "CerosalettiLab448473-Islet" = 3.5,
+  "CerosalettiLab839987-Islet" = 3.5)
+
+# Define the mapping of donor IDs to numbers
+donor_mapping <- c(
+  "CerosalettiLab1059994" = 1,
+  "CerosalettiLab1464776" = 2,
+  "CerosalettiLab448473" = 3,
+  "CerosalettiLab632811" = 4,
+  "CerosalettiLab839987" = 5,
+  "CerosalettiLab942655" = 6
+)
+
+hashtagHistograms.tmp <- htDF %>%
+  pivot_longer(cols = all_of(pool1HTVars),
+    names_to = "ht",
+    values_to = "counts") %>%
+  mutate(cutoff = htCutoffs[ht]) %>%  # Add a column with the cutoff for each hashtag
+  ggplot(aes(x = counts)) +
+  geom_histogram() +
+  geom_vline(aes(xintercept = cutoff),  # Use the cutoff column as the xintercept
+    color = "red") +
+  labs(x = "hashtag expression",
+    y = "log10(Number of cells)") +
+  scale_y_log10() +
+  scale_x_continuous(breaks = 0:12) +
+  facet_wrap(~ht,
+    scales = "free_y",
+    ncol = 3)
+
+pdf(file.path(plotDir,
+  paste0(filenameSuffix, "_HistogramsHashtags_pool1.pdf")),
+width = 12,
+height = 5.5)
+
+print(hashtagHistograms.tmp)
+
+invisible(dev.off())
+
+rm_tmp(ask = FALSE)
+
+hashtagHistograms.tmp <- htDF %>%
+  pivot_longer(cols = all_of(pool2HTVars),
+    names_to = "ht",
+    values_to = "counts") %>%
+  mutate(cutoff = htCutoffs[ht]) %>%  # Add a column with the cutoff for each hashtag
+  ggplot(aes(x = counts)) +
+  geom_histogram() +
+  geom_vline(aes(xintercept = cutoff),  # Use the cutoff column as the xintercept
+    color = "red") +
+  labs(x = "hashtag expression",
+    y = "log10(Number of cells)") +
+  scale_y_log10() +
+  scale_x_continuous(breaks = 0:12) +
+  facet_wrap(~ht,
+    scales = "free_y",
+    ncol = 3)
+
+pdf(file.path(plotDir,
+  paste0(filenameSuffix, "_HistogramsHashtags_pool2.pdf")),
+width = 12,
+height = 5.5)
+
+print(hashtagHistograms.tmp)
+
+invisible(dev.off())
+
+rm_tmp(ask = FALSE)
+
+# Match the names in htCutoffs to the column names in htDF
+htCutoffs <- htCutoffs[match(colnames(htDF), names(htCutoffs))]
+
+# Apply the cutoffs to each column
+htDF$nCells <- rowSums(sweep(htDF, 2, htCutoffs, ">"))
+
+htDF <- htDF %>%
+  dplyr::mutate(manualHT = case_when(nCells > 1 ~ "Multiplet",
+    nCells == 0 ~ "Negative",
+    `CerosalettiLab1464776-Islet` > htCutoffs["CerosalettiLab1464776-Islet"] ~ "CerosalettiLab1464776-Islet",
+    `CerosalettiLab1464776-CEFX` > htCutoffs["CerosalettiLab1464776-CEFX"] ~ "CerosalettiLab1464776-CEFX",
+    `CerosalettiLab1059994-Islet` > htCutoffs["CerosalettiLab1059994-Islet"] ~ "CerosalettiLab1059994-Islet",
+    `CerosalettiLab1059994-CEFX` > htCutoffs["CerosalettiLab1059994-CEFX"] ~ "CerosalettiLab1059994-CEFX",
+    `CerosalettiLab942655-Islet` > htCutoffs["CerosalettiLab942655-Islet"] ~ "CerosalettiLab942655-Islet",
+    `CerosalettiLab942655-CEFX` > htCutoffs["CerosalettiLab942655-CEFX"] ~ "CerosalettiLab942655-CEFX",
+    `CerosalettiLab1464776-CD3CD28` > htCutoffs["CerosalettiLab1464776-CD3CD28"] ~ "CerosalettiLab1464776-CD3CD28",
+    `CerosalettiLab1059994-CD3CD28` > htCutoffs["CerosalettiLab1059994-CD3CD28"] ~ "CerosalettiLab1059994-CD3CD28",
+    `CerosalettiLab942655-CD3CD28` > htCutoffs["CerosalettiLab942655-CD3CD28"] ~ "CerosalettiLab942655-CD3CD28",
+    `CerosalettiLab632811-CD3CD28` > htCutoffs["CerosalettiLab632811-CD3CD28"] ~ "CerosalettiLab632811-CD3CD28",
+    `CerosalettiLab448473-CD3CD28` > htCutoffs["CerosalettiLab448473-CD3CD28"] ~ "CerosalettiLab448473-CD3CD28",
+    `CerosalettiLab839987-CD3CD28` > htCutoffs["CerosalettiLab839987-CD3CD28"] ~ "CerosalettiLab839987-CD3CD28",
+    `CerosalettiLab632811-CEFX` > htCutoffs["CerosalettiLab632811-CEFX"] ~ "CerosalettiLab632811-CEFX",
+    `CerosalettiLab448473-CEFX` > htCutoffs["CerosalettiLab448473-CEFX"] ~ "CerosalettiLab448473-CEFX",
+    `CerosalettiLab839987-CEFX` > htCutoffs["CerosalettiLab839987-CEFX"] ~ "CerosalettiLab839987-CEFX",
+    `CerosalettiLab632811-Islet` > htCutoffs["CerosalettiLab632811-Islet"] ~ "CerosalettiLab632811-Islet",
+    `CerosalettiLab448473-Islet` > htCutoffs["CerosalettiLab448473-Islet"] ~ "CerosalettiLab448473-Islet",
+    `CerosalettiLab839987-Islet` > htCutoffs["CerosalettiLab839987-Islet"] ~ "CerosalettiLab839987-Islet"))
+
+# Check ht calls. Many things are multiplets according to this
+table(htDF$manualHT)
+
+png(file.path(plotDir,
+  paste0(filenameSuffix, "_Scatterplots_HTExpression_ManualDemux_V3.png")),
+height = 18,
+width = 30,
+units = "in",
+res = 600)
+
+
+ggpairs(htDF[sample(1:nrow(htDF)), ],
+  columns = 1:length(htVariables),
+  aes(color = manualHT,
+    fill = manualHT,
+    alpha = 0.4))
+
+invisible(dev.off())
+
+# add the manual demultiplexing results into @meta.data
+seuratQCMerged@meta.data <- seuratQCMerged@meta.data %>%
+  dplyr::mutate(htDemux = htDF$manualHT,
+    donorId = sub("-.*", "", htDemux),
+    stimulation = sub(".*-", "", htDemux))
+
+# Check with additional plots
+
+pdf(file.path(plotDir,
+  paste0(filenameSuffix, "_Ridgeplots_HTExpression_ManualDemux_pool1.pdf")),
+height = 20,
+width = 30)
+
+# RidgePlot(seuratQCMerged,
+#           assay = "HT",
+#           features = htVariables,
+#           group.by = "htDemux",
+#           ncol = 3) &
+#   labs(x = "Hashtag expression",
+#        y = "Assigned demux group") +
+#   scale_x_continuous(limits = c(0, 9), breaks = seq(0, 9, by = 0.5))
+
+# Create a list to store the plots
+plots <- list()
+
+# Create a plot for each feature
+for (feature in pool1HTVars) {
+  p <- RidgePlot(seuratQCMerged,
+    assay = "HT",
+    features = feature,
+    group.by = "htDemux") +
+    labs(x = "Hashtag expression",
+      y = "Assigned demux group") +
+    scale_x_continuous(limits = c(0, 10), breaks = seq(0, 10, by = 0.5)) +
+    theme(legend.position = "none")  # Remove the legend
+
+  # Add the plot to the list
+  plots[[feature]] <- p
+}
+
+# Combine the plots
+combined_plot <- patchwork::wrap_plots(plots, ncol = 3)
+
+# Print the combined plot
+print(combined_plot)
+
+invisible(dev.off())
+
+pdf(file.path(plotDir,
+  paste0(filenameSuffix, "_Ridgeplots_HTExpression_ManualDemux_pool2.pdf")),
+height = 20,
+width = 30)
+
+# Create a list to store the plots
+plots <- list()
+
+# Create a plot for each feature
+for (feature in pool2HTVars) {
+  p <- RidgePlot(seuratQCMerged,
+    assay = "HT",
+    features = feature,
+    group.by = "htDemux") +
+    labs(x = "Hashtag expression",
+      y = "Assigned demux group") +
+    scale_x_continuous(limits = c(0, 10), breaks = seq(0, 10, by = 0.5)) +
+    theme(legend.position = "none")  # Remove the legend
+
+  # Add the plot to the list
+  plots[[feature]] <- p
+}
+
+# Combine the plots
+combined_plot <- patchwork::wrap_plots(plots, ncol = 3)
+
+# Print the combined plot
+print(combined_plot)
+
+invisible(dev.off())
+
+
+DefaultAssay(seuratQCMerged) <- "HT"
+seuratQCMerged <- ScaleData(seuratQCMerged, features = rownames(htVariables),
+  verbose = FALSE)
+seuratQCMerged <- RunPCA(seuratQCMerged, features = htVariables, approx = FALSE)
+# ElbowPlot(seuratQCMerged)
+seuratQCMerged <- FindNeighbors(seuratQCMerged, dims = 1:6)
+clusterResolution <- c("HT" = 0.1, "RNA" = 0.3)
+seuratQCMerged <- FindClusters(seuratQCMerged, resolution = clusterResolution["HT"])
+
+seuratQCMerged <- RunUMAP(seuratQCMerged, dims = 1:6)
+
+# store cluster info in seurat object metadata
+# Initialize clusterName and clusterMarkers
+clusterName <- character()
+clusterMarkers <- list()
+
+clusterName[["HT"]] <-
+  paste0("seurat_clusters_RNA_", str_replace(clusterResolution[["HT"]], "\\.", "p"))
+seuratQCMerged <- seuratQCMerged %>%
+  Seurat::AddMetaData(Idents(seuratQCMerged), col.name = clusterName[["HT"]])
+
+Idents(seuratQCMerged) <- seuratQCMerged@meta.data[[clusterName[["HT"]]]]
+clusterMarkers[[paste0("HT_", clusterName[["HT"]])]] <-
+  FindAllMarkers(seuratQCMerged, assay = "HT")
+
+pdf(file.path(plotDir,
+  paste0(filenameSuffix, "_UMAP_HT_labels.pdf")),
+height = 5,
+width = 12)
+umap_plot <- DimPlot(seuratQCMerged,
+  label = TRUE,
+  repel = TRUE,
+  group.by = "htDemux")
+
+print(umap_plot)
+
+invisible(dev.off())
+```
+
+```{r TCRQCAccounting}
+# how many cell barcodes flagged by TCR QC were already eliminated by previous QC?
+# setup $barcode in the metadata
+DefaultAssay(seuratQCMerged) <- "RNA"
+seuratQCMerged@meta.data$barcode <- rownames(seuratQCMerged@meta.data)
+
+# Number of barcodes called multiplets by TCR analysis that weren't already removed
+barcodesToFilterMultiplet <- TCRs.df$barcode[which(TCRs.df$multiplet)]
+barcodesToFilterINKT <- TCRs.df$barcode[which(TCRs.df$isINKT)]
+barcodesToFilterMAIT <- TCRs.df$barcode[which(TCRs.df$isMAIT)]
+
+nNewMultipletsByTCR <- length(intersect(unique(barcodesToFilterMultiplet), seuratQCMerged@meta.data$barcode))
+print(paste("New multiplets identified by TCR analysis that were not excluded by prior QC:", nNewMultipletsByTCR))
+
+nINKTByTCR <- length(intersect(unique(barcodesToFilterINKT), seuratQCMerged@meta.data$barcode))
+print(paste("iNKT that were not already excluded by prior QC:", nINKTByTCR))
+
+nMAITByTCR <- length(intersect(unique(barcodesToFilterMAIT), seuratQCMerged@meta.data$barcode))
+print(paste("MAIT that were not already excluded by prior QC:", nMAITByTCR))
+```
+
+```{r cleanSeuratWithTCRData}
+# removes iNKT cells, MAIT cells, and TCR multiplets
+seuratQCMerged <- subset(seuratQCMerged, cells = barcodesToFilter, invert = TRUE)
+```
+
+```{r addAnnoToSeurat}
+# now that we've demultiplexed by hashtag, we can add certain metadata to the Seurat object
+
+# add studyGroup from annoP589_1
+sampleNameStudyGroup.tmp <- unique(annoP589_1[, c("sampleName", "studyGroup")])
+sampleNameStudyGroup.tmp$sampleName <- gsub("_", "-", sampleNameStudyGroup.tmp$sampleName)
+
+studyGroup_vector.tmp <- setNames(sampleNameStudyGroup.tmp$studyGroup, sampleNameStudyGroup.tmp$sampleName)
+
+seuratQCMerged@meta.data$studyGroup <- studyGroup_vector.tmp[seuratQCMerged@meta.data$htDemux]
+
+rm_tmp(ask = FALSE)
+
+# add $donorIdFigures where
+# CerosalettiLab1059994 CerosalettiLab1464776  CerosalettiLab448473  CerosalettiLab632811  CerosalettiLab839987  CerosalettiLab942655 map to
+# 1, 2, 3, 4, 5, 6, then an underscore, and then the value of $studyGroup
+# Define the mapping of donor IDs to numbers
+donor_mapping <- c(
+  "CerosalettiLab1059994" = 1,
+  "CerosalettiLab1464776" = 2,
+  "CerosalettiLab448473" = 3,
+  "CerosalettiLab632811" = 4,
+  "CerosalettiLab839987" = 5,
+  "CerosalettiLab942655" = 6
+)
+
+# Add the #donorIdFigures column to seuratQCMerged@meta.data
+seuratQCMerged@meta.data$donorIdFigures <- with(seuratQCMerged@meta.data, {
+  donor_id <- as.character(donor_mapping[donorId])
+  paste0(donor_id, "_", studyGroup)
+})
+
+# Ensure that the donorIdFigures column is correctly formatted
+seuratQCMerged@meta.data$donorIdFigures <- ifelse(
+  is.na(seuratQCMerged@meta.data$donorIdFigures),
+  NA,
+  seuratQCMerged@meta.data$donorIdFigures
+)
+
+# make $stimulationFigures where the values in $stimulation map from "CD3CD28", "CEFX", "Islet"
+# to "Polyclonal", "Microbial", "IAR"
+stimulation_mapping <- c(
+  "CD3CD28" = "Polyclonal",
+  "CEFX" = "Microbial",
+  "Islet" = "IAR"
+)
+
+# Assuming your data frame is named df
+# Add the stimulationFigures column to the data frame
+seuratQCMerged@meta.data$stimulationFigures <- stimulation_mapping[seuratQCMerged@meta.data$stimulation]
+
+# Ensure that the stimulationFigures column is correctly formatted
+seuratQCMerged@meta.data$stimulationFigures <- ifelse(
+  is.na(seuratQCMerged@meta.data$stimulationFigures),
+  NA,
+  seuratQCMerged@meta.data$stimulationFigures
+)
+
+# make $stimulationFigures a factor with order "Microbial", "IAR", "Polyclonal"
+seuratQCMerged@meta.data$stimulationFigures <- factor(seuratQCMerged@meta.data$stimulationFigures,
+  levels = c("Microbial", "IAR", "Polyclonal"))
+```
+
+```{r removeMultipletsAndNegatives}
+seuratQCMergedCleaned <- subset(seuratQCMerged,
+  subset = (htDemux %in% c("CerosalettiLab1464776-Islet",
+    "CerosalettiLab1464776-CEFX",
+    "CerosalettiLab1059994-Islet",
+    "CerosalettiLab1059994-CEFX",
+    "CerosalettiLab942655-Islet",
+    "CerosalettiLab942655-CEFX",
+    "CerosalettiLab1464776-CD3CD28",
+    "CerosalettiLab1059994-CD3CD28",
+    "CerosalettiLab942655-CD3CD28",
+    "CerosalettiLab632811-CD3CD28",
+    "CerosalettiLab448473-CD3CD28",
+    "CerosalettiLab839987-CD3CD28",
+    "CerosalettiLab632811-CEFX",
+    "CerosalettiLab448473-CEFX",
+    "CerosalettiLab839987-CEFX",
+    "CerosalettiLab632811-Islet",
+    "CerosalettiLab448473-Islet",
+    "CerosalettiLab839987-Islet")))
+
+# these cells wind up way out in no-man's land in UMAPs (B cells, most likely):
+
+# 1_ACCCTATTCGCTCCGT-1 1_AGAGAGAAGGTGAGAT-1 1_AGTGTACGTAGCGGGA-1 1_GCGCTCCGTAGAGTGA-1 1_GTCTGCGAGATATTGC-1 2_CAAGACCTCGCTTTAC-1 2_CCCAATTTCATTGTAA-1
+suspiciousCellBarcodes <- c("1_ACCCTATTCGCTCCGT-1", "1_AGAGAGAAGGTGAGAT-1", "1_AGTGTACGTAGCGGGA-1", "1_GCGCTCCGTAGAGTGA-1", "1_GTCTGCGAGATATTGC-1", "2_CAAGACCTCGCTTTAC-1", "2_CCCAATTTCATTGTAA-1")
+# metaData.df <- seuratQCMergedCleanedDS@meta.data
+
+# #filter metaData.df down to just the $barcode matching suspiciousCellBarcodes
+# metaData.df <- metaData.df[metaData.df$HT_names %in% suspiciousCellBarcodes,]
+
+# results: 3 control donors, 1 T1D. All Islet cells. No TCRs. Remove them.
+
+# remove the rows in seuratQCMergedCleaned with the rownames in suspiciousCellBarcodes
+# Identify the cell barcodes to keep
+cells_to_keep <- setdiff(rownames(seuratQCMergedCleaned@meta.data), suspiciousCellBarcodes)
+
+# Subset the @meta.data slot to keep only the rows not in suspiciousCellBarcodes
+seuratQCMergedCleaned <- subset(seuratQCMergedCleaned, cells = cells_to_keep)
+
+# now that we've removed multiplets and negatives, we can set the order of the donorIdFigures factor
+seuratQCMergedCleaned@meta.data$donorIdFigures <- factor(
+  seuratQCMergedCleaned@meta.data$donorIdFigures,
+  levels = c("1_Control", "3_Control", "4_Control", "2_T1D", "5_T1D", "6_T1D")
+)
+```
+
+```{r CD8CheckAndFilter}
+# we want to remove cells that are likely to be CD8s
+
+# setup $barcode in the metadata
+seuratQCMergedCleaned@meta.data$barcode <- rownames(seuratQCMergedCleaned@meta.data)
+
+# set the default assay to RNA
+DefaultAssay(seuratQCMergedCleaned) <- "RNA"
+
+# Extract the expression data for CD8A and CD8B
+CD8AExpression.tmp <- FetchData(seuratQCMergedCleaned, vars = "CD8A")
+CD8BExpression.tmp <- FetchData(seuratQCMergedCleaned, vars = "CD8B")
+
+# Let's also look at CD4
+CD4Expression.tmp <- FetchData(seuratQCMergedCleaned, vars = "CD4")
+
+# 20250228
+TRDCExpression.tmp <- FetchData(seuratQCMergedCleaned, vars = "TRDC")
+
+# Convert the data to a data frame
+expressionData.tmp <- data.frame(
+  CD8A = CD8AExpression.tmp$CD8A,
+  CD8B = CD8BExpression.tmp$CD8B,
+  CD4 = CD4Expression.tmp$CD4,
+  TRDC = TRDCExpression.tmp$TRDC
+)
+rownames(expressionData.tmp) <- rownames(CD4Expression.tmp)
+
+# Identify the non-zero entries in CD8A and CD8B
+nonZeroBarcodes.tmp <- rownames(expressionData.tmp)[CD8AExpression.tmp$CD8A != 0 | CD8BExpression.tmp$CD8B != 0]
+# nonZeroBarcodesCD8A.tmp <- rownames(expressionData.tmp)[CD8AExpression.tmp$CD8A != 0]
+# nonZeroBarcodesCD8B.tmp <- rownames(expressionData.tmp)[CD8BExpression.tmp$CD8B != 0]
+
+# make a subset of expressionData.tmp that only has the nonZeroBarcodes.tmp
+expressionDataCD8Pos.tmp <- expressionData.tmp[nonZeroBarcodes.tmp, ]
+
+# Subset seuratQCMergedCleaned@meta.data based on these barcodes
+metaDataSubset.df.tmp <- seuratQCMergedCleaned@meta.data %>%
+  dplyr::filter(barcode %in% nonZeroBarcodes.tmp)
+
+table(metaDataSubset.df.tmp$stimulationFigures)
+# microbial: 288, IAR: 1, Polyclonal: 12
+
+# Group the data by stimulationFigures and donorIdFigures and count the number of cells
+cell_counts.tmp <- metaDataSubset.df.tmp %>%
+  group_by(stimulationFigures, donorIdFigures) %>%
+  summarise(count = n()) %>%
+  ungroup()
+
+# Define the output file path
+output_file.tmp <- file.path(dataOutputDir, "CD8PosCells.xlsx")
+
+# Save the table to an Excel file
+write.xlsx(cell_counts.tmp, output_file.tmp)
+
+# Create histograms using ggplot2
+histCD8A.tmp <- ggplot(expressionData.tmp, aes(x = CD8A)) +
+  geom_histogram(binwidth = 0.1, fill = "blue", color = "black", alpha = 0.7) +
+  labs(title = "Histogram of CD8A Expression", x = "CD8A Expression", y = "Frequency") +
+  theme_minimal() +
+  theme(text = element_text(size = 16))
+
+histCD8B.tmp <- ggplot(expressionData.tmp, aes(x = CD8B)) +
+  geom_histogram(binwidth = 0.1, fill = "red", color = "black", alpha = 0.7) +
+  labs(title = "Histogram of CD8B Expression", x = "CD8B Expression", y = "Frequency") +
+  theme_minimal() +
+  theme(text = element_text(size = 16))
+
+scatterPlotCD4CD8A.tmp <- ggplot(expressionDataCD8Pos.tmp, aes(x = CD4, y = CD8A)) +
+  geom_point() +
+  labs(title = "Scatterplot of CD8A vs CD4", x = "CD4 Expression", y = "CD8A") +
+  theme_minimal() +
+  theme(text = element_text(size = 16))
+
+scatterPlotCD4CD8B.tmp <- ggplot(expressionDataCD8Pos.tmp, aes(x = CD4, y = CD8B)) +
+  geom_point() +
+  labs(title = "Scatterplot of CD8B vs CD4", x = "CD4 Expression", y = "CD8B") +
+  theme_minimal() +
+  theme(text = element_text(size = 16))
+
+# Print the histograms
+# print(histCD8A.tmp)
+# print(histCD8B.tmp)
+
+# let's remove the CD8 positive cells
+# Identify the cell barcodes to keep
+cellsToKeep.tmp <- setdiff(rownames(seuratQCMergedCleaned@meta.data), nonZeroBarcodes.tmp)
+
+# Subset the @meta.data slot to keep only the rows not in snonZeroBarcodes.tmp
+seuratQCMergedCleaned <- subset(seuratQCMergedCleaned, cells = cellsToKeep.tmp)
+
+rm_tmp(ask = FALSE)
+```
+
+```{r checkingTwoBetaBarcodes}
+chainCounts <- TCRs.df %>%
+  dplyr::group_by(barcode) %>%
+  dplyr::summarise(nAlpha = sum(chain ==  "TRA"),
+    nBeta = sum(chain == "TRB"))
+
+barcodesNBeta2 <- chainCounts %>%
+  dplyr::filter(nBeta == 2) %>%
+  dplyr::pull(barcode)
+
+# Intersect with cells present in seurat object (note you have to generate this without TCR filtering...)
+cellsInObject <- intersect(rownames(seuratQCMergedCleaned@meta.data), barcodesNBeta2)
+
+# Safety check
+cat("Number of nBeta=2 barcodes present in seuratQCMergedCleaned:", length(cellsInObject), "\n")
+
+# If the metadata column is named 'stimulation' (earlier you also derived 'stimulationFigures')
+stimulation_col <- "stimulation"
+
+# Tabulate stimulation
+stim_table <- table(seuratQCMergedCleaned@meta.data[cellsInObject, stimulation_col], useNA = "ifany")
+print(stim_table)
+```
+
+```{r reProcessCleanedData}
+# Re-run normalization, clustering, UMAP, etc on this subset
+seuratQCMergedCleaned <- JoinLayers(seuratQCMergedCleaned, assay = "RNA")
+
+DefaultAssay(seuratQCMergedCleaned) <- "RNA"
+seuratQCMergedCleaned <- NormalizeData(object = seuratQCMergedCleaned, verbose = FALSE, assay = "RNA")
+
+seuratQCMergedCleaned <- NormalizeData(object = seuratQCMergedCleaned,
+  verbose = FALSE,
+  normalization.method = "LogNormalize",
+  margin = 2,
+  assay = "FB")
+
+seuratQCMergedCleaned <- NormalizeData(object = seuratQCMergedCleaned,
+  verbose = FALSE,
+  normalization.method = "LogNormalize",
+  margin = 2,
+  assay = "HT")
+
+seuratQCMergedCleaned <- FindVariableFeatures(object = seuratQCMergedCleaned,
+  selection.method = "vst", nfeatures = 2000, verbose = FALSE)
+
+seuratQCMergedCleaned <- ScaleData(object = seuratQCMergedCleaned, verbose = FALSE)
+seuratQCMergedCleaned <- RunPCA(object = seuratQCMergedCleaned, npcs = 30, verbose = FALSE)
+
+# Elbow plot
+elbowPlot.tmp <- ElbowPlot(seuratQCMergedCleaned)
+
+pdf(file.path(plotDir,
+  paste0(filenameSuffix, "_elbowPlotUMAP.pdf")),
+height = 5,
+width = 6)
+
+print(elbowPlot.tmp)
+
+dev.off()
+rm_tmp(ask = FALSE)
+
+seuratQCMergedCleaned <- FindNeighbors(seuratQCMergedCleaned, dims = 1:10)
+seuratQCMergedCleaned <- FindClusters(seuratQCMergedCleaned, resolution = 0.4)
+
+set.seed(6022)
+seuratQCMergedCleaned <- RunUMAP(object = seuratQCMergedCleaned, reduction = "pca",
+  dims = 1:10,
+  n.neighbors = 30,
+  min.dist = 0.1,
+  return.model = TRUE)
+
+# store cluster info in seurat object metadata
+# Initialize clusterName and clusterMarkers
+clusterName <- character()
+clusterMarkers <- list()
+
+# Create the cluster name for RNA
+clusterName[["RNA"]] <- paste0("seurat_clusters_RNA_", str_replace(clusterResolution[["RNA"]], "\\.", "p"))
+
+# Add metadata to the Seurat object
+seuratQCMergedCleaned <- seuratQCMergedCleaned %>%
+  Seurat::AddMetaData(Idents(seuratQCMergedCleaned), col.name = clusterName[["RNA"]])
+
+# Set the identifiers
+Idents(seuratQCMergedCleaned) <- seuratQCMergedCleaned@meta.data[[clusterName[["RNA"]]]]
+
+# Join the data layers in the RNA assay if not already joined
+if (!"RNA" %in% names(seuratQCMergedCleaned@assays)) {
+  seuratQCMergedCleaned <- JoinLayers(seuratQCMergedCleaned, layers = c("RNA"))
+}
+
+# Perform the FindAllMarkers function and store the results in clusterMarkers
+clusterMarkers[[paste0("RNA_", clusterName[["RNA"]])]] <-
+  FindAllMarkers(seuratQCMergedCleaned, assay = "RNA")
+
+# Print cluster markers
+print("Cluster markers found:")
+print(clusterMarkers[[paste0("RNA_", clusterName[["RNA"]])]])
+```
+
+```{r cleanAndAddMetaDataToTCRs}
+# remove barcodes from cleanTCRs.df and cleanTCRpairs.df that aren't present in seuratQCMergedCleaned
+cleanTCRs.df <- cleanTCRs.df %>%
+  dplyr::filter(barcode %in% seuratQCMergedCleaned@meta.data$barcode)
+
+cleanTCRpairs.df <- cleanTCRpairs.df %>%
+  dplyr::filter(barcode %in% seuratQCMergedCleaned@meta.data$barcode)
+
+# add seuratQCMergedCleaned@meta.data$stimulationFigures to cleanTCRs.df, matching on $barcode
+metaData.df.tmp <- seuratQCMergedCleaned@meta.data
+
+cleanTCRs.df <- cleanTCRs.df %>%
+  left_join(metaData.df.tmp %>% dplyr::select(barcode, stimulationFigures, donorIdFigures, studyGroup), by = "barcode")
+
+cleanTCRpairs.df <- cleanTCRpairs.df %>%
+  left_join(metaData.df.tmp %>% dplyr::select(barcode, stimulationFigures, donorIdFigures, studyGroup), by = "barcode")
+
+rm_tmp(ask = FALSE)
+
+# check that we don't have any barcodes that were previously removed from the Seurat object
+# length(intersect(unique(seuratQCMergedCleaned@meta.data$barcode), unique(cleanTCRs.df$barcode)))
+# [1] 29868
+# r$> length(unique(cleanTCRs.df$barcode))
+# [1] 29868
+# nice
+```
+
+```{r loadCellTypistResultsAndAddToSeurat}
+# load in the cellTypist output
+cellTypist.df <-
+  read.csv(file.path(dataOutputDir, "P589_1_Metadata_With_CelltypistPredictions.csv")) %>%
+  data.frame()
+
+# add cellTypist.df$majority_voting to seuratQCMergedCleaned metadata as $cellTypistCalling
+# Extract barcodes from cellTypist.df and Seurat object metadata
+cellTypistBarcodes <- cellTypist.df$X
+seuratBarcodes <- seuratQCMergedCleaned@meta.data$barcode
+
+# Match barcodes and create a named vector for majority_voting
+matchingIndices <- match(seuratBarcodes, cellTypistBarcodes)
+cellTypistCalling <- cellTypist.df$majority_voting[matchingIndices]
+
+# Add cellTypistCalling to seuratQCMergedCleaned metadata
+seuratQCMergedCleaned <- Seurat::AddMetaData(
+  object = seuratQCMergedCleaned,
+  metadata = cellTypistCalling,
+  col.name = "cellTypistCalling"
+)
+
+# Replace NA values in cellTypistCalling column with "Other"
+seuratQCMergedCleaned$cellTypistCalling[is.na(seuratQCMergedCleaned$cellTypistCalling)] <- "Other"
+
+# create $cellTypistSimplified where "Treg" stays the same, "Memory CD4 T cell" becomes "Tconv", and all other cells are "Other"
+seuratQCMergedCleaned@meta.data$cellTypistSimplified <- ifelse(
+  seuratQCMergedCleaned@meta.data$cellTypistCalling == "Treg",
+  "Treg",
+  ifelse(seuratQCMergedCleaned@meta.data$cellTypistCalling == "Memory CD4 T cell",
+    "Tconv",
+    "Other")
+)
+
+# make a color palette for these cell types
+# Define the cell types including NA
+cell_types.tmp <- c("Memory CD4 T cell", "cDC1", "Memory CD8 T cell", "Treg", "Other")
+
+# Generate the color palette
+palCellTypist <- paletteer::paletteer_d("fishualize::Centropyge_loricula", n = length(cell_types.tmp))
+palCellTypist[1] <- "#FF0000" # to match palCellType
+palCellTypist[2] <- "#ff7b00"
+palCellTypist[4] <- "#0000FF" # to match palCellType
+palCellTypist[5] <- "#808080" # to match palCellType
+
+#
+# Create a named vector of colors
+names(palCellTypist) <- cell_types.tmp
+
+rm_tmp(ask = FALSE)
+```
+
+```{r loadCellTypistL3Predictions}
+# load in the cellTypist output
+cellTypist.df <-
+  read.csv(file.path(dataOutputDir, "20241220_P589-1_celltypist_L3_predictions.csv")) %>%
+  data.frame()
+
+# add cellTypist.df$majority_voting to seuratQCMergedCleaned metadata as $cellTypistCalling
+# Extract barcodes from cellTypist.df and Seurat object metadata
+cellTypistBarcodes <- cellTypist.df$X
+seuratBarcodes <- seuratQCMergedCleaned@meta.data$barcode
+
+# Match barcodes and create a named vector for majority_voting
+matchingIndices <- match(seuratBarcodes, cellTypistBarcodes)
+cellTypistCalling <- cellTypist.df$majority_voting[matchingIndices]
+
+# Add cellTypistCalling to seuratQCMergedCleaned metadata
+seuratQCMergedCleaned <- Seurat::AddMetaData(
+  object = seuratQCMergedCleaned,
+  metadata = cellTypistCalling,
+  col.name = "cellTypistCallingL3"
+)
+
+# Replace NA values in cellTypistCalling column with "Other"
+seuratQCMergedCleaned$cellTypistCallingL3[is.na(seuratQCMergedCleaned$cellTypistCallingL3)] <- "Other"
+
+# create $cellTypistSimplified where "Treg" stays the same, "Memory CD4 T cell" becomes "Tconv", and all other cells are "Other"
+seuratQCMergedCleaned@meta.data$cellTypistSimplified <- ifelse(
+  seuratQCMergedCleaned@meta.data$cellTypistCalling == "Treg",
+  "Treg",
+  ifelse(seuratQCMergedCleaned@meta.data$cellTypistCalling == "Memory CD4 T cell",
+    "Tconv",
+    "Other")
+)
+
+# # make a color palette for these cell types
+# # Define the cell types including NA
+# cell_types.tmp <- c("Memory CD4 T cell", "cDC1", "Memory CD8 T cell", "Treg", "Other")
+
+# # Generate the color palette
+palCellTypistL3 <- paletteer::paletteer_d("MoMAColors::Warhol", n = length(table(seuratQCMergedCleaned$cellTypistCallingL3)))
+
+
+# #
+# # Create a named vector of colors
+names(palCellTypistL3) <- names(table(seuratQCMergedCleaned$cellTypistCallingL3))
+
+# # Extract the new metadata column from the original Seurat object
+# new_metadata <- seuratQCMergedCleaned@meta.data$cellTypistCallingL3
+
+# # Ensure the cells are in the same order
+# new_metadata_subset <- new_metadata[Cells(seuratQCMergedCleaned)]
+
+# # Add the new metadata column to the subset Seurat object
+# seuratTreg <- Seurat::AddMetaData(seuratQCMergedCleaned, metadata = new_metadata_subset, col.name = "cellTypistCallingL3")
+
+rm_tmp(ask = FALSE)
+```
+
+```{r stemness}
+# load in the file containing the stemness ML weights
+stemnessWeights <- read_excel(file.path(dataInputDir,
+  "Malta_et_al_2018_SignatureWeights_Machine Learning Identifies Stemness Features Associated with Oncogenic Dedifferentiation_Cell.xlsx"),
+sheet = "mRNAsi")
+
+# Filter down to just the genes that we have in the RNA assay counts of the Seurat object
+stemnessWeights <- stemnessWeights[stemnessWeights$HUGO %in% rownames(seuratQCMergedCleaned[["RNA"]]$counts), ]
+
+# counts_overlap <- log2(counts_pc_norm[rownames(counts_pc_norm) %in% stemness_weights$HUGO, ]+1)
+
+# Filter down to just the genes that we have in the RNA assay counts of the Seurat object
+countsOverlap <- seuratQCMergedCleaned[["RNA"]]$counts[rownames(seuratQCMergedCleaned[["RNA"]]$counts) %in% stemnessWeights$HUGO, ]
+
+stemnessWeights$Weight <- as.numeric(stemnessWeights$Weight)
+
+# countsOverlap <- countsOverlap[stemnessWeights$HUGO, ]
+
+# Follow PanCanStem github page appraoch for assigning a stemness score
+stemnessScores <- apply(countsOverlap, 2, function(z) {
+  cor(z, stemnessWeights$Weight, method = "sp", use = "complete.obs")
+})
+
+# Scale the scores to be between 0 and 1
+stemnessScores <- stemnessScores - min(stemnessScores)
+stemnessScores <- stemnessScores / max(stemnessScores)
+
+# Add stemnessScores to the meta.data of the Seurat object
+seuratQCMergedCleaned <- Seurat::AddMetaData(seuratQCMergedCleaned, metadata = stemnessScores, col.name = "stemnessScore")
+
+# Verify that the stemnessScores have been added
+head(seuratQCMergedCleaned@meta.data)
+```
+
+```{r downsamplingCEFX}
+# First, generate a table of the number of cells from each $donorId in each $stimulation
+cellCounts.tmp <- seuratQCMergedCleaned@meta.data %>%
+  group_by(donorId, stimulation) %>%
+  summarise(cell_count = n()) %>%
+  ungroup() %>%
+  pivot_wider(names_from = stimulation, values_from = cell_count, values_fill = list(cell_count = 0))
+
+# Print the table
+print(cellCounts.tmp)
+#   donorId               CD3CD28  CEFX Islet
+#   <chr>                   <int> <int> <int>
+# 1 CerosalettiLab1059994      42  1392   110
+# 2 CerosalettiLab1464776     159  1858   152
+# 3 CerosalettiLab448473      488  3064   236
+# 4 CerosalettiLab632811      598  1315   384
+# 5 CerosalettiLab839987      274  8188   237
+# 6 CerosalettiLab942655      435 12291   244
+
+# Calculate the mean of the cell count for CD3CD28 and Islet cells per donor
+meanCellCounts.tmp <- cellCounts.tmp %>%
+  rowwise() %>%
+  mutate(meanCount = round(mean(c(CD3CD28, Islet)))) %>%
+  dplyr::select(donorId, meanCount)
+
+# Convert to a named list
+meanCellCountsList.tmp <- setNames(meanCellCounts.tmp$meanCount, meanCellCounts.tmp$donorId)
+
+# Print the list
+# print(meanCellCountsList.tmp)
+
+# Identify unique CEFX hashtags
+unique_cefx_hashtags <- unique(seuratQCMergedCleaned@meta.data$htDemux[grepl("CEFX$", seuratQCMergedCleaned@meta.data$htDemux)])
+
+# Initialize an empty list to store sampled cells
+sampled_cefx_cells_list <- list()
+
+# Iterate over each unique CEFX hashtag
+set.seed(6022)
+for (hashtag in unique_cefx_hashtags) {
+  # set.seed(6022)  # Set seed for reproducibility #NOTE move this out of the loop!! moved on 20241017
+  # during changes from downsampling from 600 CEFX to IAR count
+
+  # set nCEFXDownsample to the number of Islet cells for the current donor
+  # Extract the donor ID from the hashtag
+  donor_id <- sub("-CEFX$", "", hashtag)
+
+  # Look up the Islet cell count for the current donor
+  nCEFXDownsample <- cellCounts.tmp %>%
+    filter(donorId == donor_id) %>%
+    pull(Islet)
+
+  # Identify cells belonging to the current hashtag
+  cefx_cells <- rownames(seuratQCMergedCleaned@meta.data)[seuratQCMergedCleaned@meta.data$htDemux == hashtag]
+
+  # Check if any cells were found
+  if (length(cefx_cells) == 0) {
+    print(paste("No cells belonging to the group", hashtag, "were found."))
+  } else {
+    # Determine the number of cells to sample
+    num_cells_to_sample <- min(nCEFXDownsample, length(cefx_cells))
+
+    if (num_cells_to_sample < nCEFXDownsample) {
+      warning(paste("Only", num_cells_to_sample, "cells found belonging to the group", hashtag, ". Proceeding with available cells."))
+    }
+
+    # Randomly sample the determined number of cells from the identified cells
+    sampled_cefx_cells <- sample(cefx_cells, num_cells_to_sample)
+
+    # Add the sampled cells to the list
+    sampled_cefx_cells_list <- c(sampled_cefx_cells_list, sampled_cefx_cells)
+  }
+}
+
+# Combine all sampled CEFX cells into a single vector
+sampled_cefx_cells <- unlist(sampled_cefx_cells_list)
+
+# Identify non-CEFX cells
+non_cefx_cells <- rownames(seuratQCMergedCleaned@meta.data)[!grepl("CEFX$", seuratQCMergedCleaned@meta.data$htDemux)]
+
+# Combine sampled CEFX cells with non-CEFX cells
+all_cells_to_keep <- c(sampled_cefx_cells, non_cefx_cells)
+
+# Subset the Seurat object to include only the cells to keep
+seuratQCMergedCleanedDS <- subset(seuratQCMergedCleaned, cells = all_cells_to_keep)
+
+# Verify the downsampling
+print(paste("Number of cells after downsampling:", length(all_cells_to_keep)))
+
+cellCountsDS.tmp <- seuratQCMergedCleanedDS@meta.data %>%
+  group_by(donorIdFigures, stimulationFigures) %>%
+  summarise(cell_count = n()) %>%
+  ungroup() %>%
+  pivot_wider(names_from = stimulationFigures, values_from = cell_count, values_fill = list(cell_count = 0))
+
+print(cellCountsDS.tmp)
+
+#   donorIdFigures Microbial   IAR Polyclonal
+#   <fct>              <int> <int>      <int>
+# 1 1_Control            110   110         42
+# 2 3_Control            236   236        488
+# 3 4_Control            384   384        598
+# 4 2_T1D                152   152        159
+# 5 5_T1D                237   237        274
+# 6 6_T1D                244   244        435
+
+rm_tmp(ask = FALSE)
+```
+
+
+```{r reprocessDownsampledData}
+# Re-run normalization, clustering, UMAP, etc on this subset
+DefaultAssay(seuratQCMergedCleanedDS) <- "RNA"
+seuratQCMergedCleanedDS <- JoinLayers(seuratQCMergedCleanedDS, layers = c("RNA"))
+seuratQCMergedCleanedDS <- NormalizeData(object = seuratQCMergedCleanedDS,
+  verbose = FALSE,
+  normalization.method = "LogNormalize",
+  margin = 2,
+  assay = "FB")
+
+seuratQCMergedCleanedDS <- NormalizeData(object = seuratQCMergedCleanedDS,
+  verbose = FALSE,
+  normalization.method = "LogNormalize",
+  margin = 2,
+  assay = "HT")
+
+seuratQCMergedCleanedDS <- FindVariableFeatures(object = seuratQCMergedCleanedDS,
+  selection.method = "vst", nfeatures = 2000, verbose = FALSE)
+
+seuratQCMergedCleanedDS <- ScaleData(object = seuratQCMergedCleanedDS, verbose = FALSE)
+seuratQCMergedCleanedDS <- RunPCA(object = seuratQCMergedCleanedDS, npcs = 30, verbose = FALSE)
+
+# Elbow plot
+elbowPlot.tmp <- ElbowPlot(seuratQCMergedCleanedDS, reduction = "pca")
+
+pdf(file.path(plotDir,
+  paste0(filenameSuffix, "_elbowPlotUMAP.pdf")),
+height = 5,
+width = 6)
+
+print(elbowPlot.tmp)
+
+dev.off()
+rm_tmp(ask = FALSE)
+
+# let's do some hyperparameter optimization
+# create grid of hyperparameters to test
+hyperParamGridPCA.df <- expand.grid(
+  findNeighborsDim = c(5, 7, 14, 16, 18, 20), # these values were chosen after examining the elbow plot.
+  findClustersRes = c(0.01, 0.025, 0.05, 0.75, 0.1, 0.2, 0.25, 0.3, 0.35, 0.4, 0.5, 0.6, 0.8, 1, 1.3, 1.5, 2, 2.5) # these values were chosen somewhat arbitrarily
+)
+
+# the size of these vectors largely determines the cost of this function in walltime
+min.dist.vector <- c(0.001, 0.01, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1) # c(0.1, 0.2)
+n_neighbors.vector <- c(5, 20, 30, 40, 50) # c(5, 20)
+
+result <- optimizeRNAseqClustering(seuratQCMergedCleanedDS,
+  hyperParamGridPCA.df,
+  min.dist.vector,
+  n_neighbors.vector,
+  maxNClusters = 6)
+
+# Extract the data frames from the result
+hyperParamGridOptClusterAndUMAP.df <- result$hyperParamGridOptClusterAndUMAP.df
+hyperParamGridClusterOnly.df <- result$hyperParamGridClusterOnly.df
+
+# These are the hyperparameters for the 'optimal' clustering with 7 clusters, which was selected based upon
+# the cluster-defining genes.
+set.seed(6022)
+seuratQCMergedCleanedDS <- FindNeighbors(seuratQCMergedCleanedDS, dims = 1:14)
+seuratQCMergedCleanedDS <- FindClusters(seuratQCMergedCleanedDS, resolution = 0.25)
+
+set.seed(6022)
+seuratQCMergedCleanedDS <- RunUMAP(object = seuratQCMergedCleanedDS,
+  reduction = "pca",
+  return.model = TRUE,
+  dims = 1:14,
+  n.neighbors = 5,
+  min.dist = 0.6)
+
+# store cluster info in seurat object metadata
+# Initialize clusterName and clusterMarkers
+clusterName <- character()
+clusterMarkers <- list()
+
+# Create the cluster name for RNA
+clusterName[["RNA"]] <- paste0("seurat_clusters_RNA_", str_replace(clusterResolution[["RNA"]], "\\.", "p"))
+
+# Add metadata to the Seurat object
+seuratQCMergedCleanedDS <- seuratQCMergedCleanedDS %>%
+  Seurat::AddMetaData(Idents(seuratQCMergedCleanedDS), col.name = clusterName[["RNA"]])
+
+# Set the identifiers
+Idents(seuratQCMergedCleanedDS) <- seuratQCMergedCleanedDS@meta.data[[clusterName[["RNA"]]]]
+
+# Ensure data layers are joined
+seuratQCMergedCleanedDS <- JoinLayers(seuratQCMergedCleanedDS)
+
+# Perform the FindAllMarkers function and store the results in clusterMarkers
+clusterMarkers[[paste0("RNA_", clusterName[["RNA"]])]] <-
+  FindAllMarkers(seuratQCMergedCleanedDS, assay = "RNA")
+
+# Print cluster markers
+print("Cluster markers found:")
+print(clusterMarkers[[paste0("RNA_", clusterName[["RNA"]])]])
+
+palRNAClusters <-
+  big_colorblind_pal(
+    n_distinct(seuratQCMergedCleanedDS@meta.data[[clusterName[["RNA"]]]]),
+    shuffle_colors = TRUE,
+    drop_yellow = TRUE, drop_black = TRUE) %>%
+  setNames(sort(unique(seuratQCMergedCleanedDS@meta.data[[clusterName[["RNA"]]]])))
+
+# Get the number of distinct RNA clusters
+num_clusters <- n_distinct(seuratQCMergedCleanedDS@meta.data[[clusterName[["RNA"]]]])
+
+# Get the "ggsci::uniform_startrek" palette and adjust it
+palRNAClusters <- paletteer_d("khroma::okabeitoblack", n = num_clusters) %>%
+  sample() %>%  # Shuffle colors
+  .[!grepl("yellow|black", .)] %>%  # Drop yellow and black colors
+  setNames(sort(unique(seuratQCMergedCleanedDS@meta.data[[clusterName[["RNA"]]]])))
+```
+
+```{r setHTAsColumn}
+# Fetch the data from the "HT" assay
+ht_data <- seuratQCMergedCleanedDS[["HT"]]@data
+
+# Get the names of the HT assay for each cell
+ht_names <- colnames(ht_data)
+
+# Add the HT names to the metadata
+seuratQCMergedCleanedDS[["HT_names"]] <- ht_names
+
+# Fetch the data from the "HT" assay
+ht_data <- seuratQCMergedCleaned[["HT"]]@data
+
+# Get the names of the HT assay for each cell
+ht_names <- colnames(ht_data)
+
+# Add the HT names to the metadata
+seuratQCMergedCleaned[["HT_names"]] <- ht_names
+```
+
+```{r CITEseqMarkerScatterPlotsStimulationSplit_forGating_logNorm_noDownsample_densityPlot}
+# Manuscript Figure S1
+# Fig S1B
+# Set plot sizes
+plotHeight <- 7
+plotWidth <- 7
+fontSize <- 8
+
+# Extract and sanitize marker data
+markers <- rownames(seuratQCMergedCleaned@assays$FB@data)
+data <- as.data.frame(t(seuratQCMergedCleaned@assays$FB@data[markers, ]))
+colnames(data) <- make.names(colnames(data))
+data$stimulationFigures <- seuratQCMergedCleaned@meta.data$stimulationFigures
+data$HT_names <- seuratQCMergedCleaned@meta.data$HT_names
+
+# Gate cutoffs chosen to match the flow gating for P390 as closely as possible with help from Janice Chen
+gate_cutoffs <- list(
+  "Microbial" = list(xminTreg = 2.5, xmaxTreg = Inf, yminTreg = -0.25, ymaxTreg = 4, xminTconv = 7.5, xmaxTconv = Inf, yminTconv = 4.5, ymaxTconv = Inf),
+  "IAR" = list(xminTreg = 2.5, xmaxTreg = Inf, yminTreg = -0.25, ymaxTreg = 4, xminTconv = 7.5, xmaxTconv = Inf, yminTconv = 4.5, ymaxTconv = Inf),
+  "Polyclonal" = list(xminTreg = 2.5, xmaxTreg = Inf, yminTreg = -0.25, ymaxTreg = 4, xminTconv = 7.5, xmaxTconv = Inf, yminTconv = 4.5, ymaxTconv = Inf)
+)
+
+# Helper functions for each gating step
+create_scatterplot_CD154_CD69 <- function(df, stim, cutoffs) {
+  set.seed(6022)
+  df$CD69_jittered <- jitter(df$anti.human.CD69, amount = 0.2)
+  df$CD154_jittered <- jitter(df$anti.human.CD154, amount = 0.2)
+  ggplot(df, aes(x = CD69_jittered, y = CD154_jittered)) +
+    geom_pointdensity(alpha = 0.5) +
+    scale_color_viridis_c() +
+    labs(title = stim, x = "CD69", y = "CD154") +
+    theme_minimal(base_size = fontSize) +
+    theme(
+      legend.position = "none",
+      axis.text = element_text(size = fontSize),
+      axis.title = element_text(size = fontSize),
+      plot.title = element_text(size = fontSize),
+      strip.text = element_text(size = fontSize)
+    ) +
+    annotate("rect", xmin = cutoffs$xminTreg, xmax = cutoffs$xmaxTreg, ymin = cutoffs$yminTreg, ymax = cutoffs$ymaxTreg, alpha = 1, fill = NA, color = "blue") +
+    annotate("rect", xmin = cutoffs$xminTconv, xmax = cutoffs$xmaxTconv, ymin = cutoffs$yminTconv, ymax = cutoffs$ymaxTconv, alpha = 1, fill = NA, color = "red")
+}
+
+create_scatterplot_CD25_CD137 <- function(df, stim) {
+  set.seed(6022)
+  df$CD25_jittered <- jitter(df$anti.human.CD25, amount = 0.2)
+  df$CD137_jittered <- jitter(df$anti.human.CD137, amount = 0.2)
+  ggplot(df, aes(x = CD25_jittered, y = CD137_jittered)) +
+    annotate("rect", xmin = fontSize, xmax = Inf, ymin = 5, ymax = Inf, alpha = 0.2, fill = NA, color = "blue") +
+    geom_pointdensity(alpha = 0.5) +
+    scale_color_viridis_c() +
+    labs(title = stim, x = "CD25", y = "CD137") +
+    theme_minimal(base_size = fontSize) +
+    theme(
+      legend.position = "none",
+      axis.text = element_text(size = fontSize),
+      axis.title = element_text(size = fontSize),
+      plot.title = element_text(size = fontSize),
+      strip.text = element_text(size = fontSize)
+    )
+}
+
+create_scatterplot_CD25_CD127 <- function(df, stim) {
+  set.seed(6022)
+  df$CD25_jittered <- jitter(df$anti.human.CD25, amount = 0.2)
+  df$CD127_jittered <- jitter(df$anti.human.CD127, amount = 0.2)
+  ggplot(df, aes(x = CD25_jittered, y = CD127_jittered)) +
+    annotate("rect", xmin = 7.5, xmax = Inf, ymin = -Inf, ymax = 5, alpha = 0.2, fill = NA, color = "blue") +
+    geom_pointdensity(alpha = 0.5) +
+    scale_color_viridis_c() +
+    labs(title = stim, x = "CD25", y = "CD127") +
+    theme_minimal(base_size = fontSize) +
+    theme(
+      legend.position = "none",
+      axis.text = element_text(size = fontSize),
+      axis.title = element_text(size = fontSize),
+      plot.title = element_text(size = fontSize),
+      strip.text = element_text(size = fontSize)
+    )
+}
+
+# Prepare lists to store gating results
+cellsTconv <- list()
+cellsTreg <- list()
+plots_step1 <- list()
+plots_step2 <- list()
+plots_step3 <- list()
+
+# Loop over stimulations
+for (stim in levels(data$stimulationFigures)) {
+  # Step 1: CD69/CD154 gating
+  df1 <- data[data$stimulationFigures == stim, ]
+  cutoffs <- gate_cutoffs[[stim]]
+  plots_step1[[stim]] <- create_scatterplot_CD154_CD69(df1, stim, cutoffs)
+  # Treg gate step 1
+  gated1 <- df1[df1$anti.human.CD69 > 2.5 & df1$anti.human.CD154 < 4, ]
+  # Tconv gate
+  tconv <- df1[df1$anti.human.CD69 > 7.5 & df1$anti.human.CD154 > 4.5, "HT_names"]
+  cellsTconv[[stim]] <- tconv
+
+  # Step 2: CD25/CD137 gating (on Treg step 1)
+  if (nrow(gated1) > 0) {
+    plots_step2[[stim]] <- create_scatterplot_CD25_CD137(gated1, stim)
+    gated2 <- gated1[gated1$anti.human.CD25 > 7 & gated1$anti.human.CD137 > 4.5, ]
+  } else {
+    plots_step2[[stim]] <- ggplot() + theme_void() + labs(title = stim)
+    gated2 <- gated1[FALSE, ]
+  }
+
+  # Step 3: CD25/CD127 gating (on Treg step 2)
+  if (nrow(gated2) > 0) {
+    plots_step3[[stim]] <- create_scatterplot_CD25_CD127(gated2, stim)
+    gated3 <- gated2[gated2$anti.human.CD25 > 7.5 & gated2$anti.human.CD127 < 5, ]
+    cellsTreg[[stim]] <- gated3$HT_names
+  } else {
+    plots_step3[[stim]] <- ggplot() + theme_void() + labs(title = stim)
+    cellsTreg[[stim]] <- character(0)
+  }
+}
+
+# Helper to standardize all scatterplots
+standardize_axes <- function(p, xlim, ylim, xbreaks, ybreaks) {
+  p +
+    scale_x_continuous(limits = xlim, breaks = xbreaks, expand = expansion(mult = 0, add = 0.2)) +
+    scale_y_continuous(limits = ylim, breaks = ybreaks, expand = expansion(mult = 0, add = 0.2)) +
+    coord_fixed(ratio = diff(ylim) / diff(xlim)) +
+    theme(plot.margin = unit(c(0.2, 0.2, 0.2, 0.2), "cm"))
+}
+
+# Apply to all plots with slightly expanded limits
+for (i in seq_along(plots_step1)) {
+  plots_step1[[i]] <- standardize_axes(plots_step1[[i]], xlim = c(-0.5, 9.5), ylim = c(-0.5, 8.5),
+    xbreaks = seq(0, 9, 2), ybreaks = seq(0, 8, 2))
+}
+for (i in seq_along(plots_step2)) {
+  plots_step2[[i]] <- standardize_axes(plots_step2[[i]], xlim = c(0, 9.5), ylim = c(0, 8.5),
+    xbreaks = seq(0, 9, 2), ybreaks = seq(0, 8, 2))
+}
+for (i in seq_along(plots_step3)) {
+  plots_step3[[i]] <- standardize_axes(plots_step3[[i]], xlim = c(0, 9.5), ylim = c(0, 8.5),
+    xbreaks = seq(0, 10, 2), ybreaks = seq(0, 8, 2))
+}
+
+# Combine using wrap_plots for strict grid
+plotGrid.tmp <- patchwork::wrap_plots(
+  c(plots_step1, plots_step2, plots_step3),
+  ncol = 3, nrow = 3, guides = "collect"
+)
+
+# Save as a true square grid
+savePlot(
+  plot = plotGrid.tmp,
+  plotDir = plotDir,
+  filename = paste0(filenameSuffix, "CITEseq_TregGating_3x3"),
+  height = plotHeight,
+  width = plotWidth,
+  units = "in",
+  dpi = 600,
+  formats = c("pdf", "png")
+)
+
+# Optionally, print to Rmd output as well
+plot_grid
+
+# Combine all Tconv and Treg cells across stimulations
+cellsTconv <- unlist(cellsTconv)
+cellsTreg <- unlist(cellsTreg)
+```
+
+```{r referenceMapNonDSCells}
+# Ensure both datasets are normalized and have the same set of features
+seuratQCMergedCleaned <- NormalizeData(seuratQCMergedCleaned,
+  verbose = FALSE,
+  normalization.method = "LogNormalize",
+  margin = 2,
+  assay = "RNA")
+seuratQCMergedCleanedDS <- NormalizeData(seuratQCMergedCleanedDS,
+  verbose = FALSE,
+  normalization.method = "LogNormalize",
+  margin = 2,
+  assay = "RNA")
+
+# Find variable features for both datasets
+seuratQCMergedCleaned <- FindVariableFeatures(seuratQCMergedCleaned,
+  selection.method = "vst", nfeatures = 2000, verbose = FALSE)
+seuratQCMergedCleanedDS <- FindVariableFeatures(seuratQCMergedCleanedDS,
+  selection.method = "vst", nfeatures = 2000, verbose = FALSE)
+
+# Find the intersection of variable features
+featuresShared <- intersect(VariableFeatures(seuratQCMergedCleaned), VariableFeatures(seuratQCMergedCleanedDS))
+
+# Find transfer anchors
+anchors <- FindTransferAnchors(reference = seuratQCMergedCleanedDS, query = seuratQCMergedCleaned, features = featuresShared, reference.reduction = "pca")
+
+# Transfer cluster labels
+predictions <- TransferData(anchorset = anchors, refdata = seuratQCMergedCleanedDS$seurat_clusters, dims = 1:30)
+
+# Rename the predicted cluster labels to seurat_clusters_DS
+colnames(predictions) <- gsub("predicted.id", "seurat_clusters_DS", colnames(predictions))
+
+# Add the predicted cluster labels to the metadata of seuratQCMergedCleaned
+seuratQCMergedCleaned <- Seurat::AddMetaData(seuratQCMergedCleaned, metadata = predictions)
+
+# Project UMAP embeddings from seuratQCMergedCleanedDS onto seuratQCMergedCleaned
+# NOTE: the reference RunUMAP() call has to include "return.model = TRUE"
+seuratQCMergedCleaned <- MapQuery(
+  anchorset = anchors,
+  reference = seuratQCMergedCleanedDS,
+  query = seuratQCMergedCleaned,
+  # refdata = list(UMAP = Embeddings(seuratQCMergedCleanedDS, "umap")),
+  reference.reduction = "pca",
+  reduction.model = "umap"
+)
+
+# Copy the first projection to a new slot
+seuratQCMergedCleaned[["ref.umap_DS"]] <- seuratQCMergedCleaned[["ref.umap"]]
+
+# Plot the UMAP embeddings
+umap.trial.tmp <- DimPlot(seuratQCMergedCleaned,
+  reduction = "ref.umap_DS",
+  group.by = "seurat_clusters_DS",
+  cols = palRNAClusters)
+
+# Save the scatterplot to a file
+png(file.path(plotDir,
+  paste0(filenameSuffix, "CEFX_projectedOnDSUMAP.png")),
+height = 7,
+width = 8,
+units = "in",
+res = 600)
+
+print(umap.trial.tmp)
+
+dev.off()
+
+pdf(file.path(plotDir,
+  paste0(filenameSuffix, "CEFX_projectedOnDSUMAP.pdf")),
+height = 7,
+width = 8)
+
+print(umap.trial.tmp)
+
+dev.off()
+
+rm_tmp(ask = FALSE)
+```
+
+```{r addTotalSeqCellTypesToSeurat}
+# Set default cell type to "Other"
+seuratQCMergedCleanedDS$cellType <- "Other"
+
+# Set cell type for Tregs
+seuratQCMergedCleanedDS$cellType[
+  seuratQCMergedCleanedDS$HT_names %in% cellsTreg &
+    seuratQCMergedCleanedDS$seurat_clusters %in% c(3, 4)
+] <- "Treg"
+
+# Set cell type for Tconvs
+seuratQCMergedCleanedDS$cellType[
+  seuratQCMergedCleanedDS$HT_names %in% cellsTconv &
+    seuratQCMergedCleanedDS$seurat_clusters %in% c(0, 1, 2, 5, 6)
+] <- "Tconv"
+
+# uses the TotalSeq gating in concert with inferred seurat_cluster identity from chunk "referenceMapNonDSCells"
+# Add a new metadata column for cell type
+seuratQCMergedCleaned$cellType <- "Other"
+
+# Set cell type for Tregs
+seuratQCMergedCleaned$cellType[
+  seuratQCMergedCleaned$HT_names %in% cellsTreg &
+    seuratQCMergedCleaned$seurat_clusters_DS %in% c(3, 4)
+] <- "Treg"
+
+# Set cell type for Tconvs
+seuratQCMergedCleaned$cellType[
+  seuratQCMergedCleaned$HT_names %in% cellsTconv &
+    seuratQCMergedCleaned$seurat_clusters_DS %in% c(0, 1, 2, 5, 6)
+] <- "Tconv"
+
+# also add the gating results on their own
+seuratQCMergedCleaned$cellTypeTotalSeq <- "Other"
+
+# Set TotalSeq gating result for Tregs
+seuratQCMergedCleaned$cellTypeTotalSeq[
+  seuratQCMergedCleaned$HT_names %in% cellsTreg
+] <- "Treg"
+
+# Set TotalSeq gating result for Tconvs
+seuratQCMergedCleaned$cellTypeTotalSeq[
+  seuratQCMergedCleaned$HT_names %in% cellsTconv
+] <- "Tconv"
+
+metaData.df.tmp <- seuratQCMergedCleaned@meta.data
+
+cleanTCRs.df <- cleanTCRs.df %>%
+  left_join(metaData.df.tmp %>% dplyr::select(barcode, cellType), by = "barcode")
+
+cleanTCRpairs.df <- cleanTCRpairs.df %>%
+  left_join(metaData.df.tmp %>% dplyr::select(barcode, cellType), by = "barcode")
+```
+
+```{r clusterTregCellsSeparately}
+# make a subset seurat object that only contains the cells where $cellType == "Treg"
+seuratTreg <- subset(seuratQCMergedCleanedDS, subset = cellType == "Treg")
+# seuratClusters34.tmp <- subset(seuratQCMergedCleanedDS, subset = seurat_clusters %in% c("3", "4"))
+
+# save old clusters
+seuratTreg@meta.data$seuratClustersAllCellsDS <- seuratTreg@meta.data$seurat_clusters
+
+# set pool -*data$pool <- as.factor(seuratTreg@meta.data$pool)
+
+# Re-run normalization, clustering, UMAP, etc on this subset
+DefaultAssay(seuratTreg) <- "RNA"
+seuratTreg <- SeuratObject::JoinLayers(seuratTreg, layers = c("RNA"))
+seuratTreg <- NormalizeData(object = seuratTreg,
+  verbose = FALSE,
+  normalization.method = "LogNormalize",
+  margin = 2,
+  assay = "FB")
+
+seuratTreg <- NormalizeData(object = seuratTreg,
+  verbose = FALSE,
+  normalization.method = "LogNormalize",
+  margin = 2,
+  assay = "HT")
+
+seuratTreg <- NormalizeData(object = seuratTreg,
+  verbose = FALSE,
+  normalization.method = "LogNormalize",
+  assay = "RNA")
+
+# seuratTreg <- NormalizeData(object = seuratTreg, verbose = FALSE)
+seuratTreg <- FindVariableFeatures(object = seuratTreg,
+  selection.method = "vst", nfeatures = 2000, verbose = FALSE)
+
+seuratTreg <- ScaleData(object = seuratTreg, verbose = FALSE)
+seuratTreg <- RunPCA(object = seuratTreg, npcs = 30, verbose = FALSE)
+
+# Elbow plot
+elbowPlot.tmp <- ElbowPlot(seuratTreg)
+
+pdf(file.path(plotDir,
+  paste0(filenameSuffix, "_elbowPlotUMAP.pdf")),
+height = 5,
+width = 6)
+
+print(elbowPlot.tmp)
+
+dev.off()
+rm_tmp(ask = FALSE)
+
+# let's do some hyperparameter optimization
+# create grid of hyperparameters to test
+hyperParamGridPCA.df <- expand.grid(
+  findNeighborsDim = c(5, 7, 14, 16, 18, 20),
+  findClustersRes = c(0.01, 0.025, 0.05, 0.75, 0.1, 0.2, 0.25, 0.3, 0.35, 0.4, 0.5, 0.6, 0.8, 1, 1.3, 1.5, 2, 2.5)
+)
+
+# the size of these vectors largely determines the cost of this function in walltime
+min.dist.vector <-  c(0.001, 0.01, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1)
+n_neighbors.vector <- c(5, 20, 30, 40, 50)
+
+startTime <- Sys.time()
+print(startTime)
+
+resultTreg <- optimizeRNAseqClustering(seuratTreg,
+  hyperParamGridPCA.df,
+  min.dist.vector,
+  n_neighbors.vector,
+  maxNClusters = 6)
+
+endTime <- Sys.time()
+timeElapsed <- endTime - startTime
+print(timeElapsed)
+
+# Extract the data frames from the result
+hyperParamGridOptClusterAndUMAP.df <- resultTreg$hyperParamGridOptClusterAndUMAP.df
+hyperParamGridClusterOnly.df <- resultTreg$hyperParamGridClusterOnly.df
+
+write.xlsx(hyperParamGridOptClusterAndUMAP.df, file = file.path(dataOutputDir, "20250609_RNA_clustering_TregOnly_hyperParamGrid.xlsx"))
+
+# These are the hyperparameters for an optimal clustering solution for N = 3 clusters.
+set.seed(6022)
+seuratTreg <- FindNeighbors(seuratTreg, dims = 1:16)
+seuratTreg <- FindClusters(seuratTreg, resolution = 0.6)
+
+set.seed(6022)
+seuratTreg <- RunUMAP(object = seuratTreg,
+  reduction = "pca",
+  return.model = TRUE,
+  dims = 1:16,
+  n.neighbors = 20,
+  min.dist = 0.8)
+
+# store cluster info in seurat object metadata
+# Initialize clusterName and clusterMarkers
+clusterName <- character()
+clusterMarkers <- list()
+
+# Create the cluster name for RNA
+clusterName <- "seurat_clusters_Treg"
+
+# Add metadata to the Seurat object
+seuratTreg <- seuratTreg %>%
+  Seurat::AddMetaData(Idents(seuratTreg), col.name = clusterName)
+
+# Set the identifiers
+Idents(seuratTreg) <- seuratTreg@meta.data[[clusterName]]
+
+# Ensure data layers are joined
+seuratTreg <- JoinLayers(seuratTreg)
+
+# Perform the FindAllMarkers function and store the results in clusterMarkers
+clusterMarkers[[paste0("RNA_", clusterName)]] <-
+  FindAllMarkers(seuratTreg, assay = "RNA")
+
+# Print cluster markers
+print("Cluster markers found:")
+print(clusterMarkers[[paste0("RNA_", clusterName)]])
+
+# Get the number of distinct RNA clusters
+num_clusters <- n_distinct(seuratTreg@meta.data[[clusterName]])
+
+# Set up color palette for Treg clusters
+palRNAClustersTreg <- paletteer_d("khroma::okabeitoblack", n = num_clusters) %>%
+  .[!grepl("yellow|black", .)] %>%  # Drop yellow and black colors
+  setNames(sort(unique(seuratTreg@meta.data[[clusterName]])))
+```
+
+```{r clusterTconvSeparately}
+# make a subset seurat object that only contains the cells where $cellType == "Treg"
+seuratTconv <- subset(seuratQCMergedCleanedDS, subset = cellType == "Tconv")
+
+# save old clusters
+seuratTconv@meta.data$seuratClustersAllCellsDS <- seuratTconv@meta.data$seurat_clusters
+
+# Re-run normalization, clustering, UMAP, etc on this subset
+DefaultAssay(seuratTconv) <- "RNA"
+seuratTconv <- SeuratObject::JoinLayers(seuratTconv, layers = c("RNA"))
+seuratTconv <- NormalizeData(object = seuratTconv,
+  verbose = FALSE,
+  normalization.method = "LogNormalize",
+  margin = 2,
+  assay = "FB")
+
+seuratTconv <- NormalizeData(object = seuratTconv,
+  verbose = FALSE,
+  normalization.method = "LogNormalize",
+  margin = 2,
+  assay = "HT")
+
+seuratTconv <- NormalizeData(object = seuratTconv,
+  verbose = FALSE,
+  normalization.method = "LogNormalize",
+  assay = "RNA")
+
+# seuratTconv <- NormalizeData(object = seuratTconv, verbose = FALSE)
+seuratTconv <- FindVariableFeatures(object = seuratTconv,
+  selection.method = "vst", nfeatures = 2000, verbose = FALSE)
+
+seuratTconv <- ScaleData(object = seuratTconv, verbose = FALSE)
+seuratTconv <- RunPCA(object = seuratTconv, npcs = 30, verbose = FALSE)
+
+# Elbow plot
+elbowPlot.tmp <- ElbowPlot(seuratTconv)
+
+pdf(file.path(plotDir,
+  paste0(filenameSuffix, "_elbowPlotUMAP.pdf")),
+height = 5,
+width = 6)
+
+print(elbowPlot.tmp)
+
+dev.off()
+rm_tmp(ask = FALSE)
+
+# let's do some hyperparameter optimization
+# create grid of hyperparameters to test
+hyperParamGridPCA.df <- expand.grid(
+  findNeighborsDim = c(5, 8, 12, 14, 20), # these values were chosen after examining the elbow plot.
+  findClustersRes = c(0.01, 0.025, 0.05, 0.75, 0.1, 0.2, 0.25, 0.3, 0.35, 0.4, 0.5, 0.6, 0.8, 1, 1.3, 1.5, 2, 2.5) # these values were chosen somewhat arbitrarily
+)
+
+# the size of these vectors largely determines the cost of this function in walltime
+min.dist.vector <-  c(0.001, 0.01, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1)
+n_neighbors.vector <- c(5, 20, 30, 40, 50)
+
+# testing
+startTime <- Sys.time()
+
+resultTconv <- optimizeRNAseqClustering(seuratTconv,
+  hyperParamGridPCA.df,
+  min.dist.vector,
+  n_neighbors.vector,
+  maxNClusters = 8,
+  minNClusters = 2) # because we're starting with 5
+
+endTime <- Sys.time()
+timeElapsed <- endTime - startTime
+print(timeElapsed)
+
+# Extract the data frames from the result
+hyperParamGridOptClusterAndUMAP.df <- resultTconv$hyperParamGridOptClusterAndUMAP.df
+hyperParamGridClusterOnly.df <- resultTconv$hyperParamGridClusterOnly.df
+
+write.xlsx(hyperParamGridOptClusterAndUMAP.df, file = file.path(dataOutputDir, "20250611_RNA_clustering_TconvOnly_hyperParamGrid.xlsx"))
+
+# These are the hyperparameters that correspond to an optimal clsutering solution for N = 5 clusters.
+set.seed(6022)
+seuratTconv <- FindNeighbors(seuratTconv, dims = 1:12)
+seuratTconv <- FindClusters(seuratTconv, resolution = 0.35)
+
+set.seed(6022)
+seuratTconv <- RunUMAP(object = seuratTconv,
+  reduction = "pca",
+  return.model = TRUE,
+  dims = 1:12,
+  n.neighbors = 5,
+  min.dist = 1)
+
+# store cluster info in seurat object metadata
+# Initialize clusterName and clusterMarkers
+clusterName <- character()
+clusterMarkers <- list()
+
+# Create the cluster name for RNA
+clusterName <- "seurat_clusters_Tconv"
+
+# Add metadata to the Seurat object
+seuratTconv <- seuratTconv %>%
+  Seurat::AddMetaData(Idents(seuratTconv), col.name = clusterName)
+
+# Set the identifiers
+Idents(seuratTconv) <- seuratTconv@meta.data[[clusterName]]
+
+# Ensure data layers are joined
+seuratTconv <- JoinLayers(seuratTconv)
+
+# Perform the FindAllMarkers function and store the results in clusterMarkers
+clusterMarkers[[paste0("RNA_", clusterName)]] <-
+  FindAllMarkers(seuratTconv, assay = "RNA")
+
+# Print cluster markers
+print("Cluster markers found:")
+print(clusterMarkers[[paste0("RNA_", clusterName)]])
+
+# Get the number of distinct RNA clusters
+num_clusters <- n_distinct(seuratTconv@meta.data[[clusterName]])
+
+palRNAClustersTconv <- c(
+  "0" = "#F0E442FF",
+  "1" = "#E69F00FF",
+  "2" = "#56B4E9FF",
+  "3" = "#0072B2FF",
+  "4" = "#009E73FF"
+)
+```
+
+```{r createAgReactiveTCRSubset}
+# create a subset of cleanTCRs.df containing only the barcodes in seuratQCMergedCleaned
+# that correspond to cellType %in% c("Treg", "Tconv")
+barcodesTregTconv.tmp <- rownames(seuratQCMergedCleaned@meta.data)[seuratQCMergedCleaned@meta.data$cellType %in% c("Treg", "Tconv")]
+
+cleanTCRsAgSpecific.df <- cleanTCRs.df %>%
+  dplyr::filter(barcode %in% barcodesTregTconv.tmp)
+
+# let's re-determine the TCR pairs on this subset
+cleanTCRAgSpecificPairs.df <- combinePairs(cleanTCRsAgSpecific.df)
+
+# replace some metadata that we'd lost
+metaData.df.tmp <- seuratQCMergedCleaned@meta.data
+
+cleanTCRAgSpecificPairs.df <- cleanTCRAgSpecificPairs.df %>%
+  left_join(metaData.df.tmp %>% dplyr::select(barcode, stimulationFigures, donorIdFigures, studyGroup, cellType), by = "barcode")
+
+cleanTCRAgSpecificPairs.df$fullLengthNT <- paste0(cleanTCRAgSpecificPairs.df$fullLengthNTa, cleanTCRAgSpecificPairs.df$fullLengthNTb)
+
+rm_tmp(ask = FALSE)
+```
+
+```{r referenceMappingInferNonDSCellsInTregAndTconvClusters}
+# ==================================================Tregs=============================================================
+# note: these should only be used for cellType = Treg. The Tconv cells are probably somewhat erroneously projected.
+# Ensure both datasets are normalized and have the same set of features
+seuratQCMergedCleaned <- NormalizeData(seuratQCMergedCleaned,
+  verbose = FALSE,
+  normalization.method = "LogNormalize",
+  margin = 2,
+  assay = "RNA")
+seuratTreg <- NormalizeData(seuratTreg,
+  verbose = FALSE,
+  normalization.method = "LogNormalize",
+  margin = 2,
+  assay = "RNA")
+
+# Find variable features for both datasets
+seuratQCMergedCleaned <- FindVariableFeatures(seuratQCMergedCleaned,
+  selection.method = "vst", nfeatures = 2000, verbose = FALSE)
+seuratTreg <- FindVariableFeatures(seuratTreg,
+  selection.method = "vst", nfeatures = 2000, verbose = FALSE)
+
+# Find the intersection of variable features
+featuresShared <- intersect(VariableFeatures(seuratQCMergedCleaned), VariableFeatures(seuratTreg))
+
+# Find transfer anchors
+anchors <- FindTransferAnchors(reference = seuratTreg, query = seuratQCMergedCleaned, features = featuresShared,
+  reference.reduction = "pca")
+
+# Transfer cluster labels
+predictions <- TransferData(anchorset = anchors, refdata = seuratTreg$seurat_clusters, dims = 1:30)
+
+# Rename the predicted cluster labels to seurat_clusters_Treg
+colnames(predictions) <- gsub("predicted.id", "seurat_clusters_Treg", colnames(predictions))
+
+# Add the predicted cluster labels to the metadata of seuratQCMergedCleaned
+seuratQCMergedCleaned <- Seurat::AddMetaData(seuratQCMergedCleaned, metadata = predictions)
+
+# Project UMAP embeddings from seuratQCMergedCleanedDS onto seuratTconv
+# NOTE: the reference RunUMAP() call has to include "return.model = TRUE"
+seuratQCMergedCleaned <- MapQuery(
+  anchorset = anchors,
+  reference = seuratTreg,
+  query = seuratQCMergedCleaned,
+  # refdata = list(UMAP = Embeddings(seuratTreg, "umap")), # this line breaks the call, unsure why. Works without it, though!
+  reference.reduction = "pca",
+  reduction.model = "umap"
+)
+
+# Rename the resulting reduction slot (e.g., "ref.umap_new")
+seuratQCMergedCleaned[["ref.umap_Treg"]] <- seuratQCMergedCleaned[["ref.umap"]]
+
+# Plot the UMAP embeddings
+umap.trial.tmp <- DimPlot(seuratQCMergedCleaned,
+  reduction = "ref.umap_Treg",
+  group.by = "seurat_clusters_Treg",
+  cols = palRNAClustersTreg)
+
+# Save the scatterplot to a file
+png(file.path(plotDir,
+  paste0(filenameSuffix, "CEFX_projectedOnTregUMAP.png")),
+height = 7,
+width = 8,
+units = "in",
+res = 600)
+
+print(umap.trial.tmp)
+
+dev.off()
+
+pdf(file.path(plotDir,
+  paste0(filenameSuffix, "CEFX_projectedOnTregUMAP.pdf")),
+height = 7,
+width = 8)
+
+print(umap.trial.tmp)
+
+dev.off()
+
+# =================================Tconvs=====================================
+# note: these should only be used for cellType = Tconv. The Treg cells are probably somewhat erroneously projected.
+seuratTconv <- NormalizeData(seuratTconv,
+  verbose = FALSE,
+  normalization.method = "LogNormalize",
+  margin = 2,
+  assay = "RNA")
+
+# Find variable features for both datasets
+seuratQCMergedCleaned <- FindVariableFeatures(seuratQCMergedCleaned,
+  selection.method = "vst", nfeatures = 2000, verbose = FALSE)
+seuratTconv <- FindVariableFeatures(seuratTconv,
+  selection.method = "vst", nfeatures = 2000, verbose = FALSE)
+
+# Find the intersection of variable features
+featuresShared <- intersect(VariableFeatures(seuratQCMergedCleaned), VariableFeatures(seuratTconv))
+
+# Find transfer anchors
+anchors <- FindTransferAnchors(
+  reference = seuratTconv,
+  query = seuratQCMergedCleaned,
+  features = featuresShared,
+  reference.reduction = "pca"
+)
+
+# Transfer cluster labels
+predictions <- TransferData(anchorset = anchors, refdata = seuratTconv$seurat_clusters, dims = 1:30)
+
+# Rename the predicted cluster labels to seurat_clusters_Treg
+colnames(predictions) <- gsub("predicted.id", "seurat_clusters_Tconv", colnames(predictions))
+
+# Add the predicted cluster labels to the metadata of seuratQCMergedCleaned
+seuratQCMergedCleaned <- Seurat::AddMetaData(seuratQCMergedCleaned, metadata = predictions)
+
+# Project UMAP embeddings from seuratQCMergedCleanedDS onto seuratTconv
+# NOTE: the reference RunUMAP() call has to include "return.model = TRUE"
+seuratQCMergedCleaned <- MapQuery(
+  anchorset = anchors,
+  reference = seuratTconv,
+  query = seuratQCMergedCleaned,
+  # refdata = list(UMAP = Embeddings(seuratTconv, "umap")), # this line breaks the call, unsure why. Works without it, though!
+  reference.reduction = "pca",
+  reduction.model = "umap"
+)
+
+# Rename the resulting reduction slot (e.g., "ref.umap_new")
+seuratQCMergedCleaned[["ref.umap_Tconv"]] <- seuratQCMergedCleaned[["ref.umap"]]
+
+# Plot the UMAP embeddings
+umap.trial.tmp <- DimPlot(seuratQCMergedCleaned,
+  reduction = "ref.umap_Tconv",
+  group.by = "seurat_clusters_Tconv",
+  cols = palRNAClusters)
+
+# Save the scatterplot to a file
+png(file.path(plotDir,
+  paste0(filenameSuffix, "CEFX_projectedOnTconvUMAP.png")),
+height = 7,
+width = 8,
+units = "in",
+res = 600)
+
+print(umap.trial.tmp)
+
+dev.off()
+
+pdf(file.path(plotDir,
+  paste0(filenameSuffix, "CEFX_projectedOnTconvUMAP.pdf")),
+height = 7,
+width = 8)
+
+print(umap.trial.tmp)
+
+dev.off()
+```
+
+```{r createAgSpecificSubsetSeuratObject}
+# Create a final seurat object that contains only the antigen-specific cells
+seuratAgSpecific <- subset(seuratQCMergedCleaned, cellType %in% c("Treg", "Tconv"))
+```
+```{r savePreprocData}
+# 20240731
+save.image(file.path(dataOutputDir, "20250731_preprocData.RData"))
+```
