@@ -644,7 +644,7 @@ if (nrow(potentialSequencingErrors.df) > 0) {
   detailedSequencingErrors.df <- cleanTCRpairs.df %>%
     dplyr::semi_join(potentialSequencingErrors.df, by = c("barcode", "CDR3a")) %>%
     dplyr::arrange(barcode, CDR3a, fullLengthNTa) %>%
-    dplyr::select(barcode, CDR3a, fullLengthNTa, CDR3b, fullLengthNTb, cellType, stimulationFigures, everything())
+    dplyr::select(barcode, CDR3a, fullLengthNTa, CDR3b, fullLengthNTb, everything())
 
   cat("\nDetailed view of potential sequencing errors:\n")
   print(detailedSequencingErrors.df)
@@ -2766,4 +2766,10 @@ seuratAgSpecific <- subset(seuratQCMergedCleaned, cellType %in% c("Treg", "Tconv
 ```{r savePreprocData}
 # 20240731
 save.image(file.path(dataOutputDir, "20250731_preprocData.RData"))
+
+# export Seurat metadata
+metadata.tmp <- seuratQCMergedCleaned@meta.data
+write.xlsx(metadata.tmp, file = file.path(dataOutputDir, "20250731_seuratQCMergedCleaned_metadata.xlsx"))
+
+rm_tmp(ask = FALSE)
 ```
