@@ -1,0 +1,1906 @@
+---
+title: "10x of foreign Ag specific Tconv and Treg in T1D"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    number_sections: true
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, echo=FALSE, message=FALSE, warning=FALSE}
+# Author: Thomas H. Edwards
+# Collaborators: Karen Cerosaletti, Janice Chen, Alex Hu, Matt Dufort, Hannah DeBerg
+setwd("/Users/tedwards/Documents/projects/P589-1_Cerosaletti_Chen_foreign_autoreactive_CD4_Tcell_10X")
+
+library(knitr)
+library(dplyr)
+library(tibble)
+library(ggplot2)
+library(GGally)
+theme_set(
+  theme_bw(20) +
+    theme(panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank(),
+      panel.border = element_rect(colour = "black", fill = NA, size = 1),
+      axis.text = element_text(colour = "black"),
+      axis.ticks = element_line(colour = "black"),
+      legend.key = element_blank(),
+      strip.text.x = element_text(size = 14, margin = margin(b = 2, t = 2)),
+      strip.background = element_rect(fill = "white", colour = "black")))
+
+library(ggthemes)
+library(ggforce)
+library(ggbeeswarm)
+library(ggvenn)
+library(viridis)
+library(stringr)
+library(readxl)
+library(openxlsx)
+library(kableExtra)
+library(RColorBrewer)
+library(plotly)
+library(tidyr)
+library(gtools)
+library(data.table)
+library(miscHelpers)
+library(tcrGraph)
+library(edgeR)
+library(limma)
+library(ggrepel)
+library(ComplexHeatmap)
+library(egg) # For ggarrange
+library(ggpubr) # Also for ggarrange
+library(umap)
+library(igraph)
+library(forcats)
+library(Seurat)
+library(apird)
+library(randomcoloR)
+library(rcartocolor)
+library(paletteer)
+library(circlize)
+library(gridExtra)
+library(ggpointdensity)
+library(cowplot)
+library(clusterSim) # for cluster-evaluation metrics
+library(foreach) # for parallel for-loops
+library(TCRtools) # for making circos plots with Matt D's code
+library(scDEED)
+library(dsb)
+library(monocle3)
+library(rstatix)
+library(SeuratData)
+library(SeuratWrappers)
+library(magrittr)
+library(purrr)
+library(msigdbr)
+library(clusterProfiler)
+library(enrichplot)
+library(alphahull) # for boundary curves around clusters
+library(MASS) # for contour plots with density (provides kernal)
+library(ggh4x)
+opts_chunk$set(fig.width = 6, fig.height = 4.0, cache = TRUE, echo = FALSE, warning = FALSE, message = FALSE, cache.lazy = FALSE, results = "hide")
+opts_knit$set(root.dir = "/Users/tedwards/Documents/projects/P589-1_Cerosaletti_Chen_foreign_autoreactive_CD4_Tcell_10X")
+
+options(stringsAsFactors = FALSE)
+
+options(future.globals.maxSize = 1591289600)
+```
+
+```{r set_up_directories, cache = TRUE}
+baseDir <- "/Users/tedwards/Documents/projects/P589-1_Cerosaletti_Chen_foreign_autoreactive_CD4_Tcell_10X"
+dataInputDir <- file.path(baseDir, "data/input")
+plotDir <- file.path(baseDir, "figures")
+dataOutputDir <- file.path(baseDir, "data/output")
+dataDate <- Sys.Date() # "2025-08-08"
+filenameSuffix <- paste0("P589-1_autoreactive_CD4_Tcell_10X.", dataDate, "_")
+```
+
+```{r loadPreprocessedData, cache = TRUE}
+# Load the preprocessed data
+load(file.path(dataOutputDir, "20250731_preprocData.RData"))
+```
+
+```{r setupConstants, cache = TRUE}
+pngResolution.dpi <- 600 # dpi
+fontSize <- 8
+```
+
+```{r setupFunctions}
+airlinePlot <- function(seuratObj,
+                        tcrPairs,
+                        reductionName = "umap",
+                        displayVariable = "seurat_clusters_DS", # variable to color the UMAP by
+                        arcLinewidth = 0.1,
+                        arcAlpha = 0.5,
+                        colorPalette = palRNAClusters,
+                        plotTitle, # string
+                        colorString = "RNA Clusters", # string for the name of the legend
+                        savePlot = TRUE,
+                        plotName = "AirlinePlot",
+                        minClones = 2) { # New parameter added
+
+  DefaultAssay(seuratObj) <- "RNA"
+
+  # Make sure the specified reduction exists
+  if (is.null(seuratObj@reductions[[reductionName]])) {
+    stop(paste(reductionName, "must first be run on the Seurat object"))
+  }
+
+  # Print diagnostic information
+  cat("=== Airline Plot Diagnostics ===\n")
+  cat("Total cells in Seurat object:", nrow(seuratObj@meta.data), "\n")
+
+  # subset tcrPairs down to the barcodes present in the seuratObj
+  tcrPairs <- tcrPairs[tcrPairs$barcode %in% seuratObj@meta.data$barcode, ]
+
+  # Count cells with TCR pairs
+  cells_with_tcr <- length(unique(tcrPairs$barcode))
+  cat("Cells with TCR pairs:", cells_with_tcr, "\n")
+
+  # Check for cells with multiple TCR pairs (e.g., two alpha chains)
+  barcode_counts <- table(tcrPairs$barcode)
+  cells_with_multiple_pairs <- sum(barcode_counts > 1)
+  if (cells_with_multiple_pairs > 0) {
+    cat("WARNING: Cells with multiple TCR pairs detected:", cells_with_multiple_pairs, "\n")
+    cat("These cells will contribute multiple clone connections!\n")
+    max_pairs_per_cell <- max(barcode_counts)
+    cat("Maximum TCR pairs per cell:", max_pairs_per_cell, "\n")
+  }
+
+  # Determine clone IDs based on fullLengthNT_a and fullLengthNT_b
+  tcrPairs$cloneID <- paste(tcrPairs$fullLengthNTa, tcrPairs$fullLengthNTb, sep = "_")
+
+  # Filter out clones that do not meet the minClones threshold
+  cloneCounts <- table(tcrPairs$cloneID)
+  validClones <- names(cloneCounts[cloneCounts >= minClones])
+  tcrPairs <- tcrPairs[tcrPairs$cloneID %in% validClones, ]
+
+  # Count cells with expanded TCR pairs (after filtering)
+  cells_with_expanded_tcr <- length(unique(tcrPairs$barcode))
+  cat("Cells with expanded TCR pairs (>= ", minClones, " occurrences):", cells_with_expanded_tcr, "\n")
+  cat("Number of expanded clones:", length(validClones), "\n")
+
+  # Additional analysis for cells with multiple TCR pairs
+  if (cells_with_multiple_pairs > 0) {
+    # For cells with exactly 2 TCR pairs, analyze their expansion status
+    cells_with_2_pairs <- names(barcode_counts[barcode_counts == 2])
+
+    if (length(cells_with_2_pairs) > 0) {
+      # For each cell with 2 pairs, check how many of their TCR pairs are expanded
+      dual_tcr_analysis <- sapply(cells_with_2_pairs, function(cell_barcode) {
+        # Get the clone IDs for this cell
+        cell_clones <- tcrPairs$cloneID[tcrPairs$barcode == cell_barcode]
+        # Count how many are in the expanded list
+        sum(cell_clones %in% validClones)
+      })
+
+      # Count cells by expansion pattern
+      cells_with_1_expanded <- sum(dual_tcr_analysis == 1)
+      cells_with_both_expanded <- sum(dual_tcr_analysis == 2)
+
+      cat("--- Dual TCR Analysis ---\n")
+      cat("Cells with 2 TCR pairs that have 1 expanded pair:", cells_with_1_expanded, "\n")
+      cat("Cells with 2 TCR pairs that have both pairs expanded:", cells_with_both_expanded, "\n")
+    }
+  }
+
+  cat("================================\n")
+
+  # Link reduction coordinates to cloneIDs
+  reductionDF <- data.frame(barcode = rownames(seuratObj@meta.data),
+    dim1 = seuratObj@reductions[[reductionName]]@cell.embeddings[, 1],
+    dim2 = seuratObj@reductions[[reductionName]]@cell.embeddings[, 2])
+
+  # Merge reductionDF with TCR pairs data
+  reductionDF <- merge(reductionDF, tcrPairs, by.x = "barcode", by.y = "barcode")
+
+  # Create data frame to store links
+  curves.tmp <- data.frame(
+    cloneID = character(),
+    x = numeric(),
+    y = numeric(),
+    xend = numeric(),
+    yend = numeric()
+  )
+
+  # Loop over each clone, and extract coordinates for cells from the same clone
+  for (clone_id.tmp in na.omit(unique(reductionDF$cloneID))) {
+    clone_id_curves.tmp <- curves.tmp[0, ]
+    data_for_curves.tmp <- reductionDF %>%
+      dplyr::filter(cloneID %in% clone_id.tmp)
+    for (i in 1:(nrow(data_for_curves.tmp) - 1)) {
+      for (j in (i + 1):nrow(data_for_curves.tmp)) {
+        clone_id_curves.tmp <- rbind(
+          clone_id_curves.tmp,
+          list(
+            cloneID = data_for_curves.tmp$cloneID[i],
+            x = data_for_curves.tmp$dim1[i],
+            y = data_for_curves.tmp$dim2[i],
+            xend = data_for_curves.tmp$dim1[j],
+            yend = data_for_curves.tmp$dim2[j]
+          )
+        )
+      }
+    }
+    curves.tmp <- rbind(curves.tmp, clone_id_curves.tmp)
+  }
+
+  curves.tmp <- na.omit(curves.tmp)
+
+  gPlot <- DimPlot(
+    object = seuratObj,
+    reduction = reductionName,
+    group.by = displayVariable
+  ) +
+    scale_color_manual(values = colorPalette) +
+    labs(
+      title = plotTitle,
+      x = "UMAP 1",
+      y = "UMAP 2",
+      color = colorString
+    ) +
+    geom_curve(
+      data = curves.tmp,
+      aes(x = x, y = y, xend = xend, yend = yend),
+      linewidth = arcLinewidth,
+      alpha = arcAlpha,
+      color = "black",
+      inherit.aes = FALSE
+    ) +
+    theme(aspect.ratio = 1)
+
+
+  if (savePlot == TRUE) {
+    # png(file = file.path(plotDir, paste0(filenameSuffix, plotName, ".png")),
+    #   width = 7,
+    #   height = 5.5,
+    #   units = "in",
+    #   res = 600)
+    savePlot(
+      plot = gPlot,
+      plotDir = plotDir,
+      filename = plotName,
+      height = 5.5,
+      width = 7,
+      units = "in",
+      dpi = 600,
+      formats = c("pdf", "png") # or "pdf", "png", or c("pdf", "png")
+    )
+  }
+
+  return(gPlot)
+}
+
+# Extract UMAP coordinates and relevant metadata
+create_faceted_umap <- function(seurat_obj,
+                                reduction = "ref.umap_Treg",
+                                group_by = "seurat_clusters_Treg",
+                                facet_by = "stimulationFigures",
+                                color_palette = palRNAClustersTreg,
+                                pt_size = 1,
+                                pt_alpha = 0.8) {
+  # Extract UMAP coordinates
+  umap_coords <- as.data.frame(Embeddings(seurat_obj, reduction = reduction))
+  colnames(umap_coords) <- c("UMAP_1", "UMAP_2")
+
+  # Add cell metadata
+  umap_coords$cell_id <- rownames(umap_coords)
+  metadata <- seurat_obj@meta.data
+  metadata$cell_id <- rownames(metadata)
+
+  # Combine coordinates and metadata
+  plot_data <- merge(umap_coords, metadata, by = "cell_id")
+
+  # Get the cluster column and convert to factor if needed
+  plot_data[[group_by]] <- factor(plot_data[[group_by]])
+
+  # Create the plot
+  ggplot(plot_data, aes(x = UMAP_1, y = UMAP_2, color = .data[[group_by]])) +
+    geom_point(size = pt_size, alpha = pt_alpha) +
+    scale_color_manual(values = color_palette) +
+    facet_wrap(reformulate(facet_by)) +
+    labs(x = "UMAP 1", y = "UMAP 2", color = "Cluster", title = "") +
+    theme_minimal() +
+    theme(
+      aspect.ratio = 1,
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank(),
+      panel.border = element_rect(color = "black", fill = NA, size = 0.5),
+      strip.background = element_rect(fill = "white", color = "black"),
+      strip.text = element_text(size = 8)
+    )
+}
+
+makeClusterExpansionUpsetPlots <- function(
+    seuratObject,
+    pairs,
+    clusterColumn,
+    title = "TCR sharing analysis",
+    filename = "upset_plot.png",
+    displayCounts = TRUE, # whether or not to display counts above the barplot
+    colors = NULL
+    ) {
+  # library(dplyr)
+  # library(tidyr)
+  # library(ggplot2)
+  # library(ComplexUpset)
+  # library(patchwork)
+
+  seurat_meta <- seuratObject@meta.data
+  if (!"barcode" %in% colnames(seurat_meta)) seurat_meta$barcode <- rownames(seurat_meta)
+  subpairs <- pairs %>% filter(barcode %in% rownames(seurat_meta))
+  subpairs <- subpairs %>%
+    mutate(
+      fullLengthNTa = ifelse(is.na(fullLengthNTa) | fullLengthNTa == "", "NA", fullLengthNTa),
+      fullLengthNTb = ifelse(is.na(fullLengthNTb) | fullLengthNTb == "", "NA", fullLengthNTb),
+      pairnt = paste(fullLengthNTa, fullLengthNTb, sep = "_")
+    ) %>%
+    filter(!grepl("^NA_|_NA$|^NA_NA$", pairnt))
+
+  subpairs <- left_join(subpairs, seurat_meta[, c("barcode", clusterColumn)], by = "barcode")
+  colnames(subpairs)[ncol(subpairs)] <- "cluster"
+  subpairs <- filter(subpairs, !is.na(cluster))
+
+  expandedPairs <- subpairs %>%
+    group_by(pairnt) %>%
+    filter(n() > 1) %>%
+    ungroup() %>%
+    distinct(pairnt, cluster)
+
+  clusters_sorted <- sort(unique(as.character(expandedPairs$cluster)))
+  membership_df <- expandedPairs %>%
+    mutate(present = TRUE) %>%
+    pivot_wider(id_cols = pairnt, names_from = cluster, values_from = present, values_fill = FALSE)
+  for (col in setdiff(clusters_sorted, colnames(membership_df))) membership_df[[col]] <- FALSE
+  membership_df <- membership_df[, c("pairnt", clusters_sorted)]
+
+  cluster_sets <- setdiff(colnames(membership_df), "pairnt")
+  if (is.null(colors)) colors <- scales::hue_pal()(length(cluster_sets))
+
+  upset_plot <- ComplexUpset::upset(
+    membership_df,
+    intersect = cluster_sets,
+    name = "Expanded Clonotypes",
+    base_annotations = list(
+      "Intersection size" = ComplexUpset::intersection_size(
+        counts = displayCounts,
+        text = list(size = 3, angle = 0, hjust = 0.5, vjust = 0)
+      )
+    ),
+    stripes = ComplexUpset::upset_stripes(colors = colors),
+    set_sizes = ComplexUpset::upset_set_size(
+      geom = ggplot2::geom_bar(stat = "count", position = "stack", fill = "grey50"),
+      position = "left"
+    ),
+    sort_sets = FALSE,
+    sort_intersections = "descending",
+    guides = "over",
+    width_ratio = 0.2,
+    height_ratio = 0.7
+  ) +
+    ggtitle(title) +
+    labs(caption = paste("Based on", nrow(membership_df), "unique expanded clonotypes")) +
+    patchwork::plot_layout() &
+    theme(
+      plot.title = element_text(hjust = 0.5),
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank()
+    )
+
+  savePlot(
+    plot = upset_plot,
+    plotDir = plotDir,
+    filename = filename,
+    height = 6,
+    width = 8,
+    units = "in",
+    dpi = 600,
+    formats = c("pdf", "png")
+  )
+  invisible(membership_df)
+}
+
+# Helpers added 2026-05 for the combined Treg+Tconv dotplot, Treg-signature
+# figures (Hollbacher / Cheng), and Tconv-vs-Treg NT-expansion variants.
+
+# Port of orderGenesByExpression() from
+# /Users/tedwards/Documents/projects/P650_..._CD4CD8_Tcell/code/P650_functions.R
+# Orders a gene vector so that, when used as the `features` arg of a DotPlot
+# grouped by `groupBy`, the dots form a stair-step / diagonal pattern.
+orderGenesByExpression <- function(seuratObj, genes, groupBy, assay = "RNA") {
+  avgExp <- AverageExpression(
+    seuratObj,
+    features = genes,
+    group.by = groupBy,
+    assays = assay,
+    slot = "data"
+  )[[assay]]
+
+  peakGroup <- apply(avgExp, 1, which.max)
+  peakValue <- apply(avgExp, 1, max)
+
+  orderDf <- data.frame(
+    gene = rownames(avgExp),
+    peakGroup = peakGroup,
+    peakValue = peakValue,
+    stringsAsFactors = FALSE
+  )
+
+  orderDf <- orderDf %>%
+    dplyr::arrange(peakGroup, dplyr::desc(peakValue))
+
+  return(orderDf$gene)
+}
+
+# Add a `clusterCellType` column on a Treg+Tconv-subset Seurat object that
+# combines the per-cellType cluster columns (seurat_clusters_Treg /
+# seurat_clusters_Tconv) into labels like "0_Treg", "1_Tconv". Returns the
+# Seurat object with the new metadata column and a factor with Treg clusters
+# (numerically sorted) listed before Tconv clusters.
+buildCombinedClusterIdent <- function(seuratObj,
+                                      tregClusterCol = "seurat_clusters_Treg",
+                                      tconvClusterCol = "seurat_clusters_Tconv",
+                                      cellTypeCol = "cellType",
+                                      newCol = "clusterCellType") {
+  md <- seuratObj@meta.data
+  ct <- as.character(md[[cellTypeCol]])
+  treg_clust <- as.character(md[[tregClusterCol]])
+  tconv_clust <- as.character(md[[tconvClusterCol]])
+
+  combined <- rep(NA_character_, nrow(md))
+  combined[ct == "Treg"]  <- paste0(treg_clust[ct == "Treg"],   "_Treg")
+  combined[ct == "Tconv"] <- paste0(tconv_clust[ct == "Tconv"], "_Tconv")
+
+  treg_levels  <- paste0(gtools::mixedsort(unique(treg_clust[ct == "Treg"])),   "_Treg")
+  tconv_levels <- paste0(gtools::mixedsort(unique(tconv_clust[ct == "Tconv"])), "_Tconv")
+  lvl <- c(treg_levels, tconv_levels)
+
+  seuratObj <- AddMetaData(seuratObj, factor(combined, levels = lvl), col.name = newCol)
+  seuratObj
+}
+
+# Per-(donor, stimulation, cellType) proportion of cells whose nucleotide-level
+# TCR clone (paste of fullLengthNTa + fullLengthNTb) is expanded (>= 2 cells)
+# within that (donor, stimulation, cellType) group. When downsample = TRUE,
+# Treg and Tconv are downsampled to equal counts within each (donor, stim)
+# before computing the proportion (per the Fig 3d caption).
+medianProportionExpandedNT <- function(seuratObj,
+                                       tcrPairs,
+                                       stimulations = c("IAR", "Microbial", "Polyclonal"),
+                                       cellTypes = c("Tconv", "Treg"),
+                                       downsample = FALSE,
+                                       seed = 314,
+                                       verbose = TRUE) {
+  set.seed(seed)
+
+  # Build a per-cell metadata frame restricted to the cellTypes / stimulations
+  # of interest, joined to the TCR pair info (one row per cell with a paired
+  # TCR; cells without a paired TCR are dropped because they cannot share an
+  # NT sequence).
+  md <- seuratObj@meta.data %>%
+    tibble::rownames_to_column("rn") %>%
+    dplyr::mutate(barcode = if ("barcode" %in% colnames(.)) barcode else rn) %>%
+    dplyr::filter(cellType %in% cellTypes,
+                  stimulationFigures %in% stimulations)
+
+  pairs <- tcrPairs %>%
+    dplyr::filter(barcode %in% md$barcode) %>%
+    dplyr::mutate(cloneID = paste(fullLengthNTa, fullLengthNTb, sep = "_")) %>%
+    dplyr::select(barcode, cloneID) %>%
+    # If a cell has multiple pairs, keep the first (matches existing scripts)
+    dplyr::distinct(barcode, .keep_all = TRUE)
+
+  cellDf <- md %>%
+    dplyr::inner_join(pairs, by = "barcode") %>%
+    dplyr::select(barcode, donorIdFigures, studyGroup,
+                  stimulationFigures, cellType, cloneID)
+
+  if (isTRUE(verbose)) {
+    cat("\n[medianProportionExpandedNT] downsample =", downsample,
+      "| pre-downsample cells per (donor, stim, cellType):\n")
+    print(cellDf %>%
+      dplyr::count(donorIdFigures, stimulationFigures, cellType) %>%
+      tidyr::pivot_wider(names_from = cellType, values_from = n, values_fill = 0L) %>%
+      dplyr::arrange(stimulationFigures, donorIdFigures))
+  }
+
+  # Optional per-(donor, stim) downsampling between Tconv and Treg.
+  # Uses group_split + bind_rows for clarity (avoids group_modify subtleties
+  # around dropped group columns). Donors lacking BOTH cellTypes within a
+  # given stimulation are dropped from the downsampled output.
+  if (isTRUE(downsample)) {
+    groups <- cellDf %>%
+      dplyr::group_by(donorIdFigures, stimulationFigures) %>%
+      dplyr::group_split()
+
+    downsampledList <- lapply(groups, function(.d) {
+      cts_present <- unique(.d$cellType)
+      if (length(cts_present) < 2) return(.d[0, , drop = FALSE])
+      minN <- min(table(.d$cellType))
+      if (minN < 1) return(.d[0, , drop = FALSE])
+      .d %>%
+        dplyr::group_by(cellType) %>%
+        dplyr::slice_sample(n = minN) %>%
+        dplyr::ungroup()
+    })
+    cellDf <- dplyr::bind_rows(downsampledList)
+
+    if (isTRUE(verbose)) {
+      cat("[medianProportionExpandedNT] POST-downsample cells per (donor, stim, cellType):\n")
+      print(cellDf %>%
+        dplyr::count(donorIdFigures, stimulationFigures, cellType) %>%
+        tidyr::pivot_wider(names_from = cellType, values_from = n, values_fill = 0L) %>%
+        dplyr::arrange(stimulationFigures, donorIdFigures))
+    }
+  }
+
+  # Per (donor, stim, cellType) proportion of cells in expanded clones
+  prop_df <- cellDf %>%
+    dplyr::group_by(donorIdFigures, studyGroup, stimulationFigures, cellType, cloneID) %>%
+    dplyr::summarise(n = dplyr::n(), .groups = "drop") %>%
+    dplyr::group_by(donorIdFigures, studyGroup, stimulationFigures, cellType) %>%
+    dplyr::summarise(
+      total_cells = sum(n),
+      expanded_cells = sum(n[n >= 2]),
+      propExpandedNT = ifelse(total_cells > 0, expanded_cells / total_cells, NA_real_),
+      .groups = "drop"
+    )
+
+  prop_df
+}
+
+# Per-(donor, stimulation, cellType, chain) TCR statistics computed with the
+# subsampling scheme from the paired plate-sorted dataset (getSharingSubsampled /
+# getDiversitySubsampled): within each (donor, stimulation, chain), if Tconv and
+# Treg differ in cell count, the LARGER cell type is randomly subsampled down to
+# the smaller's n, N times, and the metric is averaged over the N draws; the
+# smaller cell type is used in full. BOTH metrics are computed on the SAME draws
+# in a single pass, so the expansion-proportion and Inverse-Simpson figures share
+# identical pseudorandom downsamples. Returns one row per
+# (donor, studyGroup, stim, cellType, chain) with:
+#   - propExpandedNT : proportion of cells whose chain sequence is shared
+#                      (appears >= 2x) within the group (== "expansion proportion")
+#   - invSimpson     : Inverse Simpson's index  D = 1 / sum(p_i^2)
+# Chains: TRA (fullLengthNTa), TRB (fullLengthNTb), pair (alpha_beta).
+subsampledTcrStatsByChain <- function(seuratObj,
+                                      tcrPairs,
+                                      stimulations = c("IAR", "Microbial", "Polyclonal"),
+                                      cellTypes = c("Tconv", "Treg"),
+                                      chains = c("TRA", "TRB", "pair"),
+                                      N = 100,
+                                      downsample = TRUE,
+                                      seed = 314,
+                                      verbose = TRUE) {
+  set.seed(seed)
+
+  md <- seuratObj@meta.data %>%
+    tibble::rownames_to_column("rn") %>%
+    dplyr::mutate(barcode = if ("barcode" %in% colnames(.)) barcode else rn) %>%
+    dplyr::filter(cellType %in% cellTypes,
+                  stimulationFigures %in% stimulations)
+
+  pairs <- tcrPairs %>%
+    dplyr::filter(barcode %in% md$barcode) %>%
+    dplyr::select(barcode, fullLengthNTa, fullLengthNTb) %>%
+    dplyr::distinct(barcode, .keep_all = TRUE)
+
+  cellDf <- md %>%
+    dplyr::inner_join(pairs, by = "barcode") %>%
+    dplyr::transmute(donorIdFigures, studyGroup, stimulationFigures, cellType,
+      TRA = fullLengthNTa,
+      TRB = fullLengthNTb,
+      pair = paste(fullLengthNTa, fullLengthNTb, sep = "_"))
+
+  cleanSeqs <- function(s) s[!is.na(s) & s != "" & s != "NA_NA" & s != "NA"]
+  # proportion of sequences that are shared (appear >= 2x) == cells in expanded clones
+  sharedProp <- function(s) {
+    s <- cleanSeqs(s); if (length(s) == 0) return(NA_real_)
+    shared <- unique(s[duplicated(s)]); sum(s %in% shared) / length(s)
+  }
+  invSimp <- function(s) {
+    s <- cleanSeqs(s); if (length(s) == 0) return(NA_real_)
+    p <- as.numeric(table(s)); p <- p / sum(p); 1 / sum(p^2)
+  }
+
+  donors <- unique(cellDf$donorIdFigures)
+  rows <- list()
+  for (did in donors) {
+    for (stim in stimulations) {
+      sdf <- cellDf[cellDf$donorIdFigures == did &
+                    cellDf$stimulationFigures == stim, , drop = FALSE]
+      if (nrow(sdf) == 0) next
+      sg <- sdf$studyGroup[1]
+      for (ch in chains) {
+        tconvSeqs <- cleanSeqs(sdf[[ch]][sdf$cellType == "Tconv"])
+        tregSeqs  <- cleanSeqs(sdf[[ch]][sdf$cellType == "Treg"])
+        nT <- length(tconvSeqs); nR <- length(tregSeqs)
+        if (nT == 0 || nR == 0) next
+
+        if (isTRUE(downsample) && nT != nR) {
+          m <- min(nT, nR)
+          if (nT > nR) {
+            draws <- lapply(seq_len(N), function(i) sample(tconvSeqs, m))
+            propT <- mean(vapply(draws, sharedProp, numeric(1)))
+            simpT <- mean(vapply(draws, invSimp,    numeric(1)))
+            propR <- sharedProp(tregSeqs);  simpR <- invSimp(tregSeqs)
+          } else {
+            draws <- lapply(seq_len(N), function(i) sample(tregSeqs, m))
+            propR <- mean(vapply(draws, sharedProp, numeric(1)))
+            simpR <- mean(vapply(draws, invSimp,    numeric(1)))
+            propT <- sharedProp(tconvSeqs); simpT <- invSimp(tconvSeqs)
+          }
+        } else {
+          propT <- sharedProp(tconvSeqs); simpT <- invSimp(tconvSeqs)
+          propR <- sharedProp(tregSeqs);  simpR <- invSimp(tregSeqs)
+        }
+
+        rows[[length(rows) + 1]] <- data.frame(
+          donorIdFigures = did, studyGroup = sg, stimulationFigures = stim,
+          chain = ch,
+          cellType = c("Tconv", "Treg"),
+          n_cells = c(nT, nR),
+          propExpandedNT = c(propT, propR),
+          invSimpson = c(simpT, simpR),
+          stringsAsFactors = FALSE)
+      }
+    }
+  }
+  dplyr::bind_rows(rows)
+}
+
+# Paired t-test on per-donor (Tconv - Treg) differences of `valueCol`, computed
+# within each combination of `groupCols`, then BH-adjusted across the resulting
+# tests. Mirrors the reference's t.test(diffs) on per-donor differences; returns
+# n_paired, p_val, adj_p per group. (Insufficient pairs -> NA.)
+pairedDiffTest <- function(df, valueCol, groupCols) {
+  sel <- df %>%
+    dplyr::select(dplyr::all_of(c(groupCols, "donorIdFigures", "cellType", valueCol)))
+  names(sel)[names(sel) == valueCol] <- ".val"
+  wide <- sel %>%
+    tidyr::pivot_wider(names_from = cellType, values_from = ".val")
+  wide %>%
+    dplyr::group_by(dplyr::across(dplyr::all_of(groupCols))) %>%
+    dplyr::summarise(
+      n_paired = sum(!is.na(Tconv) & !is.na(Treg)),
+      p_val = {
+        d <- Tconv - Treg; d <- d[!is.na(d)]
+        if (length(d) < 3) NA_real_ else stats::t.test(d)$p.value
+      },
+      .groups = "drop") %>%
+    dplyr::mutate(adj_p = p.adjust(p_val, method = "BH"))
+}
+```
+
+## Figure S3
+
+```{r FigureS3B}
+# CITEseqMarkerScatterPlotsStimulationSplit_forGating_logNorm_noDownsample_densityPlot
+# Figure S1B
+# Set plot sizes
+plotHeight <- 7
+plotWidth <- 7
+fontSize <- 8
+
+# Extract and sanitize marker data
+markers <- rownames(seuratQCMergedCleaned@assays$FB@data)
+data <- as.data.frame(t(seuratQCMergedCleaned@assays$FB@data[markers, ]))
+colnames(data) <- make.names(colnames(data))
+data$stimulationFigures <- seuratQCMergedCleaned@meta.data$stimulationFigures
+data$HT_names <- seuratQCMergedCleaned@meta.data$HT_names
+
+# Gate cutoffs
+gate_cutoffs <- list(
+  "Microbial" = list(xminTreg = 2.5, xmaxTreg = Inf, yminTreg = -0.25, ymaxTreg = 4, xminTconv = 7.5, xmaxTconv = Inf, yminTconv = 4.5, ymaxTconv = Inf),
+  "IAR" = list(xminTreg = 2.5, xmaxTreg = Inf, yminTreg = -0.25, ymaxTreg = 4, xminTconv = 7.5, xmaxTconv = Inf, yminTconv = 4.5, ymaxTconv = Inf),
+  "Polyclonal" = list(xminTreg = 2.5, xmaxTreg = Inf, yminTreg = -0.25, ymaxTreg = 4, xminTconv = 7.5, xmaxTconv = Inf, yminTconv = 4.5, ymaxTconv = Inf)
+)
+
+# Helper functions for each gating step
+create_scatterplot_CD154_CD69 <- function(df, stim, cutoffs) {
+  set.seed(6022)
+  df$CD69_jittered <- jitter(df$anti.human.CD69, amount = 0.2)
+  df$CD154_jittered <- jitter(df$anti.human.CD154, amount = 0.2)
+  ggplot(df, aes(x = CD69_jittered, y = CD154_jittered)) +
+    geom_pointdensity(alpha = 0.5) +
+    scale_color_viridis_c() +
+    labs(title = stim, x = "CD69", y = "CD154") +
+    theme_minimal(base_size = fontSize) +
+    theme(
+      legend.position = "none",
+      axis.text = element_text(size = fontSize),
+      axis.title = element_text(size = fontSize),
+      plot.title = element_text(size = fontSize),
+      strip.text = element_text(size = fontSize)
+    ) +
+    annotate("rect", xmin = cutoffs$xminTreg, xmax = cutoffs$xmaxTreg, ymin = cutoffs$yminTreg, ymax = cutoffs$ymaxTreg, alpha = 1, fill = NA, color = "blue") +
+    annotate("rect", xmin = cutoffs$xminTconv, xmax = cutoffs$xmaxTconv, ymin = cutoffs$yminTconv, ymax = cutoffs$ymaxTconv, alpha = 1, fill = NA, color = "red")
+}
+
+create_scatterplot_CD25_CD137 <- function(df, stim) {
+  set.seed(6022)
+  df$CD25_jittered <- jitter(df$anti.human.CD25, amount = 0.2)
+  df$CD137_jittered <- jitter(df$anti.human.CD137, amount = 0.2)
+  ggplot(df, aes(x = CD25_jittered, y = CD137_jittered)) +
+    annotate("rect", xmin = fontSize, xmax = Inf, ymin = 5, ymax = Inf, alpha = 0.2, fill = NA, color = "blue") +
+    geom_pointdensity(alpha = 0.5) +
+    scale_color_viridis_c() +
+    labs(title = stim, x = "CD25", y = "CD137") +
+    theme_minimal(base_size = fontSize) +
+    theme(
+      legend.position = "none",
+      axis.text = element_text(size = fontSize),
+      axis.title = element_text(size = fontSize),
+      plot.title = element_text(size = fontSize),
+      strip.text = element_text(size = fontSize)
+    )
+}
+
+create_scatterplot_CD25_CD127 <- function(df, stim) {
+  set.seed(6022)
+  df$CD25_jittered <- jitter(df$anti.human.CD25, amount = 0.2)
+  df$CD127_jittered <- jitter(df$anti.human.CD127, amount = 0.2)
+  ggplot(df, aes(x = CD25_jittered, y = CD127_jittered)) +
+    annotate("rect", xmin = 7.5, xmax = Inf, ymin = -Inf, ymax = 5, alpha = 0.2, fill = NA, color = "blue") +
+    geom_pointdensity(alpha = 0.5) +
+    scale_color_viridis_c() +
+    labs(title = stim, x = "CD25", y = "CD127") +
+    theme_minimal(base_size = fontSize) +
+    theme(
+      legend.position = "none",
+      axis.text = element_text(size = fontSize),
+      axis.title = element_text(size = fontSize),
+      plot.title = element_text(size = fontSize),
+      strip.text = element_text(size = fontSize)
+    )
+}
+
+# Prepare lists to store gating results
+cellsTconv <- list()
+cellsTreg <- list()
+plots_step1 <- list()
+plots_step2 <- list()
+plots_step3 <- list()
+
+# Loop over stimulations
+for (stim in levels(data$stimulationFigures)) {
+  # Step 1: CD69/CD154 gating
+  df1 <- data[data$stimulationFigures == stim, ]
+  cutoffs <- gate_cutoffs[[stim]]
+  plots_step1[[stim]] <- create_scatterplot_CD154_CD69(df1, stim, cutoffs)
+  # Treg gate step 1
+  gated1 <- df1[df1$anti.human.CD69 > 2.5 & df1$anti.human.CD154 < 4, ]
+  # Tconv gate
+  tconv <- df1[df1$anti.human.CD69 > 7.5 & df1$anti.human.CD154 > 4.5, "HT_names"]
+  cellsTconv[[stim]] <- tconv
+
+  # Step 2: CD25/CD137 gating (on Treg step 1)
+  if (nrow(gated1) > 0) {
+    plots_step2[[stim]] <- create_scatterplot_CD25_CD137(gated1, stim)
+    gated2 <- gated1[gated1$anti.human.CD25 > 7 & gated1$anti.human.CD137 > 4.5, ]
+  } else {
+    plots_step2[[stim]] <- ggplot() + theme_void() + labs(title = stim)
+    gated2 <- gated1[FALSE, ]
+  }
+
+  # Step 3: CD25/CD127 gating (on Treg step 2)
+  if (nrow(gated2) > 0) {
+    plots_step3[[stim]] <- create_scatterplot_CD25_CD127(gated2, stim)
+    gated3 <- gated2[gated2$anti.human.CD25 > 7.5 & gated2$anti.human.CD127 < 5, ]
+    cellsTreg[[stim]] <- gated3$HT_names
+  } else {
+    plots_step3[[stim]] <- ggplot() + theme_void() + labs(title = stim)
+    cellsTreg[[stim]] <- character(0)
+  }
+}
+
+# Helper to standardize all scatterplots
+standardize_axes <- function(p, xlim, ylim, xbreaks, ybreaks) {
+  p +
+    scale_x_continuous(limits = xlim, breaks = xbreaks, expand = expansion(mult = 0, add = 0.2)) +
+    scale_y_continuous(limits = ylim, breaks = ybreaks, expand = expansion(mult = 0, add = 0.2)) +
+    coord_fixed(ratio = diff(ylim) / diff(xlim)) +
+    theme(plot.margin = unit(c(0.2, 0.2, 0.2, 0.2), "cm"))
+}
+
+# Apply to all plots with slightly expanded limits
+for (i in seq_along(plots_step1)) {
+  plots_step1[[i]] <- standardize_axes(plots_step1[[i]], xlim = c(-0.5, 9.5), ylim = c(-0.5, 8.5),
+    xbreaks = seq(0, 9, 2), ybreaks = seq(0, 8, 2))
+}
+for (i in seq_along(plots_step2)) {
+  plots_step2[[i]] <- standardize_axes(plots_step2[[i]], xlim = c(0, 9.5), ylim = c(0, 8.5),
+    xbreaks = seq(0, 9, 2), ybreaks = seq(0, 8, 2))
+}
+for (i in seq_along(plots_step3)) {
+  plots_step3[[i]] <- standardize_axes(plots_step3[[i]], xlim = c(0, 9.5), ylim = c(0, 8.5),
+    xbreaks = seq(0, 10, 2), ybreaks = seq(0, 8, 2))
+}
+
+# Combine using wrap_plots for strict grid
+plotGrid.tmp <- patchwork::wrap_plots(
+  c(plots_step1, plots_step2, plots_step3),
+  ncol = 3, nrow = 3, guides = "collect"
+)
+
+# Save as a true square grid
+savePlot(
+  plot = plotGrid.tmp,
+  plotDir = plotDir,
+  filename = "CITEseq_TregGating_3x3",
+  height = plotHeight,
+  width = plotWidth,
+  units = "in",
+  dpi = 600,
+  formats = c("pdf", "png")
+)
+```
+
+```{r FigureS3C}
+# All-cells UMAP with RNA cluster labels
+set.seed(6022)
+plot.tmp <- DimPlot(object = seuratQCMergedCleaned,
+  reduction = "ref.umap_DS",
+  group = "seurat_clusters_DS",
+  shuffle = TRUE,
+  pt.size = 1) +
+  scale_color_manual(values = palRNAClusters) +
+  labs(x = "UMAP 1", y = "UMAP 2", color = "Cluster", title = "") +
+  theme(aspect.ratio = 1) #+
+#   facet_wrap(~seurat_clusters)
+
+savePlot(
+  plot = plot.tmp,
+  plotDir = plotDir,
+  filename = "UMAP_RNA",
+  height = 6,
+  width = 10,
+  units = "in",
+  dpi = 600,
+  formats = c("pdf", "png") # or "pdf", "png", or c("pdf", "png")
+)
+```
+
+```{r FigureS3D}
+# now just the TotalSeq gating calling
+nClust <- length(table(seuratQCMergedCleaned@meta.data$seurat_clusters_DS))
+nClustString <- paste0("_", as.character(nClust), "Clusters")
+
+# Extract metadata
+metadata.tmp <- seuratQCMergedCleaned@meta.data
+
+# Rename 'Other' to 'Not Ag-specific' in cellTypeTotalSeq
+metadata.tmp$cellTypeTotalSeq <- as.character(metadata.tmp$cellTypeTotalSeq)
+metadata.tmp$cellTypeTotalSeq[metadata.tmp$cellTypeTotalSeq == "Other"] <- "Not Ag-specific"
+metadata.tmp$cellTypeTotalSeq <- factor(metadata.tmp$cellTypeTotalSeq, levels = c("Treg", "Tconv", "Not Ag-specific"))
+
+palCellTypeTotalSeq <- c("Treg" = "blue", "Tconv" = "red", "Not Ag-specific" = "gray")
+
+# make the plot
+plot.tmp <- ggplot(metadata.tmp, aes(x = seurat_clusters_DS, fill = cellTypeTotalSeq)) +
+  # geom_bar(position = "fill") +
+  geom_bar(position = position_fill(reverse = TRUE)) +
+  labs(x = "Seurat Clusters", y = "Proportion", fill = "TotalSeq Gating") +
+  scale_fill_manual(values = palCellTypeTotalSeq) +
+  theme(
+    axis.title = element_text(size = 8),
+    axis.text = element_text(size = 8),
+    legend.title = element_text(size = 8),
+    legend.text = element_text(size = 8),
+    strip.text = element_text(size = 8)
+  )
+
+savePlot(
+  plot = plot.tmp,
+  plotDir = plotDir,
+  filename = paste0(nClustString, "_TotalSeqGatingProportionsInSeuratClusters"),
+  height = 2.5,
+  width = 7,
+  units = "in",
+  dpi = 600,
+  formats = c("pdf", "png") # or "pdf", "png", or c("pdf", "png")
+)
+
+rm_tmp(ask = FALSE)
+```
+
+```{r FigureS3E}
+# Set up cluster info
+nClust <- length(table(seuratQCMergedCleaned@meta.data$seurat_clusters_DS))
+nClustString <- paste0("_", as.character(nClust), "Clusters")
+
+# Extract metadata
+metadata.tmp <- seuratAgSpecific@meta.data
+
+# create separate proportion plots and then combine them
+fontSize <- 8
+
+# Create the three plots
+plot1 <- ggplot(metadata.tmp, aes(x = seurat_clusters_DS, fill = studyGroup)) +
+  geom_bar(position = "fill") +
+  labs(x = NULL, y = "Proportion", fill = "Study Group", title = "Proportions of Study Group in Seurat Clusters") +
+  scale_fill_manual(values = palStudyGroup) +
+  theme_minimal() +
+  theme(text = element_text(size = fontSize),
+    axis.text.x = element_blank(),
+    axis.text.y = element_text(size = fontSize),
+    axis.title.x = element_blank(),
+    axis.title.y = element_text(size = fontSize),
+    legend.text = element_text(size = fontSize),
+    legend.title = element_text(size = fontSize),
+    strip.text = element_text(size = fontSize),
+    plot.title = element_text(size = fontSize))
+
+plot2 <- ggplot(metadata.tmp, aes(x = seurat_clusters_DS, fill = stimulationFigures)) +
+  geom_bar(position = "fill") +
+  labs(x = NULL, y = "Proportion", fill = "Stimulation", title = "Proportions of Stimulation in Seurat Clusters") +
+  scale_fill_manual(values = palStimulation) +
+  theme_minimal() +
+  theme(text = element_text(size = fontSize),
+    axis.text.x = element_blank(),
+    axis.text.y = element_text(size = fontSize),
+    axis.title.x = element_blank(),
+    axis.title.y = element_text(size = fontSize),
+    legend.text = element_text(size = fontSize),
+    legend.title = element_text(size = fontSize),
+    strip.text = element_text(size = fontSize),
+    plot.title = element_text(size = fontSize))
+
+plot3 <- ggplot(metadata.tmp, aes(x = seurat_clusters_DS, fill = donorIdFigures)) +
+  geom_bar(position = "fill") +
+  labs(x = "Seurat Clusters", y = "Proportion", fill = "Donor ID", title = "Proportions of Donor ID in Seurat Clusters") +
+  scale_fill_manual(values = palDonorId) +
+  theme_minimal() +
+  theme(text = element_text(size = fontSize),
+    axis.text.x = element_text(size = fontSize),
+    axis.text.y = element_text(size = fontSize),
+    axis.title.x = element_text(size = fontSize),
+    axis.title.y = element_text(size = fontSize),
+    legend.text = element_text(size = fontSize),
+    legend.title = element_text(size = fontSize),
+    strip.text = element_text(size = fontSize),
+    plot.title = element_text(size = fontSize))
+
+# Combine the plots vertically
+plot.tmp <- plot_grid(plot1, plot2, plot3, ncol = 1, align = "v", rel_heights = c(1, 1, 1.2))
+
+# Save the combined plot to .pdf and .png
+savePlot(
+  plot = plot.tmp,
+  plotDir = plotDir,
+  filename = paste0(nClustString, "_Combined_Proportions_in_seurat_clusters"),
+  height = 5,
+  width = 6,
+  units = "in",
+  dpi = 600,
+  formats = c("pdf", "png") # or "pdf", "png", or c("pdf", "png")
+)
+
+rm_tmp(ask = FALSE)
+```
+
+```{r FigureS3F}
+# DGETregVsTconvHeatmapAllStims
+# Figure 1
+fontSize <- 8
+
+# Genes to label
+genesToHighlight <- c("FOXP3", "IL2RA", "CTLA4", "ICOS", "IL32", "CD74", "TNFRSF1B", "TNFRSF9", "TNFRSF4", "BACH2", "RPL6", "RPS6", "RPS12", "EEF1G", "EEF1B2", "LDHB")
+
+# heatmaps for Treg - Tconv within each stimulation
+DGETable.tmp <- read.csv(paste0(dataOutputDir, "/DGE_Combined_TregVTconv.csv"))
+
+# ==========================top 60 p val=====================================================
+nGenes <- 60
+
+# 1. Select top N = 60 genes by smallest adjusted p-value from DGEIAR
+top_genes <- DGETable.tmp %>%
+  dplyr::arrange(adj.P.Val) %>%   # Sort by adjusted p-value in ascending order
+  dplyr::slice(1:nGenes) %>%          # Select the top 50 genes
+  dplyr::pull(gene)
+
+# 2. Filter Seurat object for relevant cells
+filtered_cells <- seuratQCMergedCleaned@meta.data %>%
+  dplyr::filter(cellType %in% c("Treg", "Tconv"))
+
+# Create donorId_cellType variable
+filtered_cells <- filtered_cells %>%
+  dplyr::mutate(donorId_cellType = paste(donorIdFigures, cellType, sep = "_"))
+
+# 3. Extract normalized expression data for top genes
+# Assuming 'data' slot contains log-normalized data
+expressionMatrix <- GetAssayData(seuratQCMergedCleaned, assay = "RNA", slot = "data")[top_genes, rownames(filtered_cells)]
+
+# 4. Aggregate counts by donorId_cellType
+expressionMatrix <- as.data.frame(t(expressionMatrix))
+expressionMatrix$donorId_cellType <- filtered_cells$donorId_cellType
+
+# 4. Aggregate expression data by donorId_cellType using the mean
+aggregated_counts <- expressionMatrix %>%
+  dplyr::group_by(donorId_cellType) %>%
+  summarise(across(everything(), mean))
+
+# Convert aggregated counts back to matrix
+aggregated_matrix <- as.matrix(aggregated_counts[, -1])
+rownames(aggregated_matrix) <- aggregated_counts$donorId_cellType
+
+# Transpose to have genes as rows and donorId_cellType as columns
+aggregated_matrix <- t(aggregated_matrix)
+
+# 5. Calculate z-scores for each gene across samples
+z_scores <- t(scale(t(aggregated_matrix)))
+
+# 6. Create annotation dataframe
+metadata <- seuratQCMergedCleaned@meta.data
+filtered_metadata <- metadata %>%
+  dplyr::filter(cellType %in% c("Treg", "Tconv")) %>%
+  dplyr::mutate(donorId_cellType = paste(donorIdFigures, cellType, sep = "_")) %>%
+  dplyr::select(donorIdFigures, studyGroup, seurat_clusters_DS, donorId_cellType, cellType)
+
+# Ensure the order of metadata matches the samples
+filtered_metadata <- filtered_metadata[match(colnames(z_scores), filtered_metadata$donorId_cellType), ]
+
+# 7. Reorder columns: Treg on the left, Tconv on the right
+cell_type_order <- factor(filtered_metadata$cellType, levels = c("Treg", "Tconv"))
+column_order <- order(cell_type_order)  # Treg first, Tconv second
+
+# Reorder z_scores and filtered_metadata
+z_scores <- z_scores[, column_order]
+filtered_metadata <- filtered_metadata[column_order, ]
+
+# 5. Define annotations for the heatmap
+heatmapAnnotation <- HeatmapAnnotation(
+  "Donor ID" = filtered_metadata$donorIdFigures,
+  "Cell Type" = filtered_metadata$cellType,
+  col = list(
+    "Donor ID" = palDonorId,
+    "Cell Type" = palCellType
+  ),
+  annotation_name_gp = gpar(fontsize = fontSize, fontface = "plain"),
+  annotation_legend_param = list(
+    "Donor ID" = list(
+      title = "Donor ID",
+      title_gp = gpar(fontsize = fontSize, fontface = "plain"),   # Remove boldface
+      labels_gp = gpar(fontsize = fontSize, fontface = "plain")   # Remove boldface from labels too
+    ),
+    "Cell Type" = list(
+      title = "Cell Type",
+      title_gp = gpar(fontsize = fontSize, fontface = "plain"),
+      labels_gp = gpar(fontsize = fontSize, fontface = "plain")
+    )
+  )
+)
+
+# 8. Define color function for heatmap
+heatmap_colors <- colorRamp2(c(-2, 0, 2), c("blue", "white", "red"))
+
+# 9. Create a vector for row label formatting: bold for genesToHighlight, plain otherwise
+row_labels <- rownames(z_scores)
+row_fontfaces <- ifelse(row_labels %in% genesToHighlight, "bold", "plain")
+
+# 10. Create the heatmap
+heatmap.tmp <- Heatmap(
+  z_scores,
+  name = "Z-score",
+  top_annotation = heatmapAnnotation,
+  show_row_names = TRUE,
+  show_column_names = FALSE,
+  cluster_rows = TRUE,
+  cluster_columns = TRUE,
+  col = heatmap_colors,
+  border = TRUE,
+  row_names_gp = gpar(fontsize = fontSize, fontface = row_fontfaces),
+  column_names_gp = gpar(fontsize = fontSize),
+  heatmap_legend_param = list(
+    title_gp = gpar(fontsize = fontSize, fontface = "plain"), # Remove boldface from Z-score
+    labels_gp = gpar(fontsize = fontSize)
+  )
+)
+
+savePlot(
+  plot = heatmap.tmp,
+  plotDir = plotDir,
+  filename = "TregMinTconv_allStims_heatmap_top60Pval",
+  height = 10,
+  width = 9,
+  units = "in",
+  dpi = 600,
+  formats = c("pdf", "png") # or "pdf", "png", or c("pdf", "png")
+)
+
+rm_tmp(ask = FALSE)
+```
+
+## Figure S4
+
+```{r FigureS4A}
+# FigureS4A
+# RNA UMAP Tregs
+seurat.tmp <- subset(seuratAgSpecific, cellType == "Treg")
+
+nClust <- length(table(seurat.tmp@meta.data$seurat_clusters_Treg))
+nClustString <- paste0("_", as.character(nClust), "Clusters")
+
+set.seed(314)
+plot.tmp <- DimPlot(object = seurat.tmp,
+  reduction = "ref.umap_Treg",
+  group = "seurat_clusters_Treg",
+  shuffle = TRUE,
+  pt.size = 1) +
+  scale_color_manual(values = palRNAClustersTreg) +
+  labs(x = "UMAP 1", y = "UMAP 2", color = "Cluster", title = "") +
+  theme(aspect.ratio = 1)
+
+savePlot(
+  plot = plot.tmp,
+  plotDir = plotDir,
+  filename = paste0(nClustString, "UMAP_RNA_TregOnly"),
+  height = 6,
+  width = 10,
+  units = "in",
+  dpi = 600,
+  formats = c("pdf", "png")
+)
+```
+
+```{r FigureS4B}
+# FigureS4B
+# RNA UMAP Tconvs
+seurat.tmp <- subset(seuratAgSpecific, cellType == "Tconv")
+
+nClust <- length(table(seurat.tmp@meta.data$seurat_clusters_Tconv))
+nClustString <- paste0("", as.character(nClust), "Clusters")
+
+set.seed(314)
+plot.tmp <- DimPlot(object = seurat.tmp,
+  reduction = "ref.umap_Tconv",
+  group = "seurat_clusters_Tconv",
+  shuffle = TRUE,
+  pt.size = 1) +
+  scale_color_manual(values = palRNAClustersTconv) +
+  labs(x = "UMAP 1", y = "UMAP 2", color = "Cluster", title = "") +
+  theme(aspect.ratio = 1)
+
+savePlot(
+  plot = plot.tmp,
+  plotDir = plotDir,
+  filename = paste0(nClustString, "UMAP_RNA_TconvOnly"),
+  height = 6,
+  width = 10,
+  units = "in",
+  dpi = 600,
+  formats = c("pdf", "png")
+)
+```
+
+```{r FigureS4C}
+# FigureS4C
+
+# Combined Treg + Tconv dotplot of the curated gene lists, rows = cluster
+# labels like "0_Treg", "1_Tconv", single shared color scale, genes ordered
+# diagonally (stair-step) by peak-expression cluster.
+
+dotPlotDotSize <- 3.75
+
+# Treg+Tconv subset and combined cluster identity
+seurat.tmp <- subset(seuratAgSpecific, cellType %in% c("Treg", "Tconv"))
+seurat.tmp <- buildCombinedClusterIdent(seurat.tmp)
+
+# Pool the `curated` columns from both gene-list data frames
+genes.tmp <- unique(c(
+  geneListsTreg.df$curated,
+  geneListsTconv.df$curated
+))
+genes.tmp <- genes.tmp[!is.na(genes.tmp)]
+genes.tmp <- intersect(genes.tmp, rownames(seurat.tmp))
+
+cat("Combined curated dotplot: using", length(genes.tmp), "genes across",
+  length(levels(seurat.tmp$clusterCellType)), "cluster_cellType groups\n")
+
+# Stair-step ordering of genes by peak-expression group
+genesOrdered <- orderGenesByExpression(seurat.tmp, genes.tmp,
+  groupBy = "clusterCellType")
+
+# Single DotPlot call -> a single shared color scale across all rows
+dotPlot.tmp <- DotPlot(seurat.tmp,
+  features = genesOrdered,
+  group.by = "clusterCellType",
+  dot.scale = dotPlotDotSize) +
+  theme(axis.text.x = element_text(angle = 60, hjust = 1, size = fontSize),
+    text = element_text(size = fontSize),
+    axis.text.y = element_text(size = fontSize),
+    axis.title.x = element_text(size = fontSize),
+    axis.title.y = element_text(size = fontSize),
+    legend.text = element_text(size = fontSize),
+    legend.title = element_text(size = fontSize),
+    strip.text = element_text(size = fontSize),
+    plot.title = element_text(size = fontSize)) +
+  labs(y = "Cluster_CellType", x = "Curated Treg + Tconv genes (stair-step ordered)") +
+  guides(color = guide_colorbar(title = "Average\nExpression\nz-score"),
+    size = guide_legend(title = "Percent\nExpressed")) +
+  scale_color_gradient2(low = "blue", mid = "white", high = "red")
+
+# auto width: ~0.16 in per gene plus 4 in for axes/legend
+plotWidth <- max(8, 4 + length(genesOrdered) * 0.16)
+
+savePlot(
+  plot = dotPlot.tmp,
+  plotDir = plotDir,
+  filename = "combined_TregTconv_curated_dotplot_stairstep",
+  height = 5,
+  width = plotWidth,
+  units = "in",
+  dpi = 600,
+  formats = c("pdf", "png")
+)
+
+rm_tmp(ask = FALSE)
+```
+
+```{r FigureS4DLeft}
+# Figure S4D (left)
+# RNA UMAP Tregs, stimulation
+seurat.tmp <- subset(seuratAgSpecific, cellType == "Treg")
+
+nClust <- length(table(seurat.tmp@meta.data$seurat_clusters_Treg))
+nClustString <- paste0("", as.character(nClust), "Clusters")
+
+set.seed(314)
+plot.tmp <- DimPlot(object = seurat.tmp,
+  reduction = "ref.umap_Treg",
+  group = "stimulationFigures",
+  shuffle = TRUE,
+  pt.size = 1) +
+  scale_color_manual(values = palStimulation) +
+  labs(x = "UMAP 1", y = "UMAP 2", color = "Stimulation", title = "") +
+  theme(aspect.ratio = 1)
+
+savePlot(
+  plot = plot.tmp,
+  plotDir = plotDir,
+  filename = paste0(nClustString, "UMAP_RNA_TregOnly_stimulation"),
+  height = 6,
+  width = 10,
+  units = "in",
+  dpi = 600,
+  formats = c("pdf", "png")
+)
+```
+
+```{r FigureS4DRight}
+# Figure S4D (right)
+fontSize <- 8
+# Subset to Treg cells (adjust if needed)
+metadata_treg <- seuratQCMergedCleaned@meta.data %>%
+  filter(cellType == "Treg")
+
+# Get all unique values
+all_donors <- unique(metadata_treg$donorIdFigures)
+all_stims <- unique(metadata_treg$stimulationFigures)
+all_clusters <- unique(metadata_treg$seurat_clusters_Treg)
+
+# 1. Create all possible combinations
+all_combos <- expand_grid(
+  donorIdFigures = unique(metadata_treg$donorIdFigures),
+  stimulationFigures = unique(metadata_treg$stimulationFigures),
+  seurat_clusters_Treg = unique(metadata_treg$seurat_clusters_Treg)
+)
+
+# 2. Count cells per combination
+counts_df <- metadata_treg %>%
+  group_by(donorIdFigures, stimulationFigures, seurat_clusters_Treg) %>%
+  summarise(count = n(), .groups = "drop")
+
+# 3. Fill in missing combinations with zero
+counts_df_full <- all_combos %>%
+  left_join(counts_df, by = c("donorIdFigures", "stimulationFigures", "seurat_clusters_Treg")) %>%
+  mutate(count = ifelse(is.na(count), 0L, count))
+
+# 4. Get total cells per donor/stim
+donor_stim_total <- metadata_treg %>%
+  group_by(donorIdFigures, stimulationFigures) %>%
+  summarise(total = n(), .groups = "drop")
+
+# 5. Calculate percentage
+prop_df <- counts_df_full %>%
+  left_join(donor_stim_total, by = c("donorIdFigures", "stimulationFigures")) %>%
+  mutate(percentage = ifelse(total > 0, (count / total) * 100, 0))
+
+# (Optional) Verify that for each donor and stimulation the percentages sum to ~100%
+prop_sum <- prop_df %>%
+  group_by(donorIdFigures, stimulationFigures) %>%
+  summarise(sum_perc = sum(percentage))
+
+print(prop_sum)
+
+# --- Calculate p-values with BY correction (using only IAR vs Microbial) ---
+p_values <- prop_df %>%
+  filter(stimulationFigures %in% c("IAR", "Microbial")) %>%
+  group_by(seurat_clusters_Treg) %>%
+  summarise(p_val = t.test(percentage ~ stimulationFigures)$p.value, .groups = "drop") %>%
+  mutate(adj_p = p.adjust(p_val, method = "BY"),
+    label = paste0("p_adj = ", signif(adj_p, 3)))
+
+# Compute a y-axis annotation position per cluster
+annotation_df <- prop_df %>%
+  group_by(seurat_clusters_Treg) %>%
+  summarise(ann_y = 80, .groups = "drop") %>%
+  left_join(p_values, by = "seurat_clusters_Treg")
+
+# Create a named list of element_rect for each cluster
+strip_colors <- lapply(palRNAClustersTreg, function(color) {
+  element_rect(fill = color, color = "black", size = 0.5)
+})
+
+# Create significance labels
+annotation_df <- prop_df %>%
+  filter(stimulationFigures %in% c("IAR", "Microbial")) %>%
+  group_by(seurat_clusters_Treg) %>%
+  summarise(ann_y = max(percentage) + 5, .groups = "drop") %>%
+  left_join(p_values, by = "seurat_clusters_Treg") %>%
+  mutate(label = case_when(
+    adj_p > 0.05 ~ "ns",
+    adj_p <= 0.05 & adj_p > 0.01 ~ "*",
+    adj_p <= 0.01 & adj_p > 0.001 ~ "**",
+    adj_p <= 0.001 ~ "***"
+  ),
+  group1 = "IAR",
+  group2 = "Microbial",
+  y.position = ann_y)
+
+# Plot with significance bars
+plot.tmp <- ggplot(prop_df, aes(x = stimulationFigures, y = percentage)) +
+  geom_boxplot(aes(fill = stimulationFigures), alpha = 0.85, outlier.shape = NA) +
+  geom_jitter(color = "black", width = 0.2, size = 2) +
+  facet_wrap2(~seurat_clusters_Treg, nrow = 1,
+    strip = strip_themed(background_x = strip_colors)) +
+  labs(x = "Stimulation", y = "Percentage of Treg cells per donor (within stimulation)") +
+  theme_classic(base_size = fontSize) +
+  theme(panel.border = element_rect(color = "black", fill = NA, size = 0.5)) +
+  scale_fill_manual(name = "Stimulation", values = palStimulation) +
+  scale_color_manual(values = palStimulation) +
+  stat_pvalue_manual(annotation_df,
+    label = "label",
+    xmin = "group1",
+    xmax = "group2",
+    y.position = "y.position",
+    tip.length = 0.01,
+    size = 4)
+
+# Print the Plot to png and pdf files
+savePlot(
+  plot = plot.tmp,
+  plotDir = plotDir,
+  filename = "TregClusterBreakdown_PerStim_Percent_stimulationColors",
+  height = 5.5,
+  width = 8,
+  units = "in",
+  dpi = 600,
+  formats = c("pdf", "png") # or "pdf", "png", or c("pdf", "png")
+)
+
+rm_tmp(ask = FALSE)
+```
+
+```{r FigureS4ERight}
+# Figure S4E (right)
+fontSize <- 8
+# Subset to Tconv cells (adjust if needed)
+metadata_Tconv <- seuratQCMergedCleaned@meta.data %>%
+  filter(cellType == "Tconv")
+
+# Get all unique values
+all_donors <- unique(metadata_Tconv$donorIdFigures)
+all_stims <- unique(metadata_Tconv$stimulationFigures)
+all_clusters <- unique(metadata_Tconv$seurat_clusters_Tconv)
+
+# 1. Create all possible combinations
+all_combos <- expand_grid(
+  donorIdFigures = unique(metadata_Tconv$donorIdFigures),
+  stimulationFigures = unique(metadata_Tconv$stimulationFigures),
+  seurat_clusters_Tconv = unique(metadata_Tconv$seurat_clusters_Tconv)
+)
+
+# 2. Count cells per combination
+counts_df <- metadata_Tconv %>%
+  group_by(donorIdFigures, stimulationFigures, seurat_clusters_Tconv) %>%
+  summarise(count = n(), .groups = "drop")
+
+# 3. Fill in missing combinations with zero
+counts_df_full <- all_combos %>%
+  left_join(counts_df, by = c("donorIdFigures", "stimulationFigures", "seurat_clusters_Tconv")) %>%
+  mutate(count = ifelse(is.na(count), 0L, count))
+
+# 4. Get total cells per donor/stim
+donor_stim_total <- metadata_Tconv %>%
+  group_by(donorIdFigures, stimulationFigures) %>%
+  summarise(total = n(), .groups = "drop")
+
+# 5. Calculate percentage
+prop_df <- counts_df_full %>%
+  left_join(donor_stim_total, by = c("donorIdFigures", "stimulationFigures")) %>%
+  mutate(percentage = ifelse(total > 0, (count / total) * 100, 0))
+
+# (Optional) Verify that for each donor and stimulation the percentages sum to ~100%
+prop_sum <- prop_df %>%
+  group_by(donorIdFigures, stimulationFigures) %>%
+  summarise(sum_perc = sum(percentage))
+
+print(prop_sum)
+
+# --- Calculate p-values with BY correction (using only IAR vs Microbial) ---
+p_values <- prop_df %>%
+  filter(stimulationFigures %in% c("IAR", "Microbial")) %>%
+  group_by(seurat_clusters_Tconv) %>%
+  summarise(p_val = t.test(percentage ~ stimulationFigures)$p.value, .groups = "drop") %>%
+  mutate(adj_p = p.adjust(p_val, method = "BY"),
+    label = paste0("p_adj = ", signif(adj_p, 3)))
+
+# Compute a y-axis annotation position per cluster
+annotation_df <- prop_df %>%
+  group_by(seurat_clusters_Tconv) %>%
+  summarise(ann_y = 80, .groups = "drop") %>%
+  left_join(p_values, by = "seurat_clusters_Tconv")
+
+# Create a named list of element_rect for each cluster
+strip_colors <- lapply(palRNAClustersTconv, function(color) {
+  element_rect(fill = color, color = "black", size = 0.5)
+})
+
+# Create significance labels
+annotation_df <- prop_df %>%
+  filter(stimulationFigures %in% c("IAR", "Microbial")) %>%
+  group_by(seurat_clusters_Tconv) %>%
+  summarise(ann_y = max(percentage) + 5, .groups = "drop") %>%
+  left_join(p_values, by = "seurat_clusters_Tconv") %>%
+  mutate(label = case_when(
+    adj_p > 0.05 ~ "ns",
+    adj_p <= 0.05 & adj_p > 0.01 ~ "*",
+    adj_p <= 0.01 & adj_p > 0.001 ~ "**",
+    adj_p <= 0.001 ~ "***"
+  ),
+  group1 = "IAR",
+  group2 = "Microbial",
+  y.position = ann_y)
+
+# Plot with significance bars
+plot.tmp <- ggplot(prop_df, aes(x = stimulationFigures, y = percentage)) +
+  geom_boxplot(aes(fill = stimulationFigures), alpha = 0.85, outlier.shape = NA) +
+  geom_jitter(color = "black", width = 0.2, size = 2) +
+  facet_wrap2(~seurat_clusters_Tconv, nrow = 1,
+    strip = strip_themed(background_x = strip_colors)) +
+  labs(x = "Stimulation", y = "Percentage of Tconv cells per donor (within stimulation)") +
+  theme_classic(base_size = fontSize) +
+  theme(panel.border = element_rect(color = "black", fill = NA, size = 0.5)) +
+  scale_fill_manual(name = "Stimulation", values = palStimulation) +
+  scale_color_manual(values = palStimulation) +
+  stat_pvalue_manual(annotation_df,
+    label = "label",
+    xmin = "group1",
+    xmax = "group2",
+    y.position = "y.position",
+    tip.length = 0.01,
+    size = 4)
+
+# Print the Plot to png and pdf files
+savePlot(
+  plot = plot.tmp,
+  plotDir = plotDir,
+  filename = "TconvClusterBreakdown_PerStim_Percent_stimulationColors",
+  height = 5.5,
+  width = 8,
+  units = "in",
+  dpi = 600,
+  formats = c("pdf", "png") # or "pdf", "png", or c("pdf", "png")
+)
+
+rm_tmp(ask = FALSE)
+```
+
+```{r FigureS4ELeft}
+# Figure S4E (left)
+# RNA UMAP Tconvs, stimulation
+seurat.tmp <- subset(seuratAgSpecific, cellType == "Tconv")
+
+nClust <- length(table(seurat.tmp@meta.data$seurat_clusters_Tconv))
+nClustString <- paste0("", as.character(nClust), "Clusters")
+
+set.seed(314)
+plot.tmp <- DimPlot(object = seurat.tmp,
+  reduction = "ref.umap_Tconv",
+  group = "stimulationFigures",
+  shuffle = TRUE,
+  pt.size = 1) +
+  scale_color_manual(values = palStimulation) +
+  labs(x = "UMAP 1", y = "UMAP 2", color = "Stimulation", title = "") +
+  theme(aspect.ratio = 1)
+
+savePlot(
+  plot = plot.tmp,
+  plotDir = plotDir,
+  filename = paste0(nClustString, "UMAP_RNA_TconvOnly_stimulation"),
+  height = 6,
+  width = 10,
+  units = "in",
+  dpi = 600,
+  formats = c("pdf", "png")
+)
+
+rm_tmp(ask = FALSE)
+```
+
+# Figure S6
+
+```{r FigureS6A}
+# Figure S6A Airline plots
+# make subset Seurat object
+seurat.tmp <- subset(seuratAgSpecific, subset = stimulationFigures == "IAR")
+
+# cleanTCRAgSpecificInterStimPairs.df
+# plot airline
+airlinePlot(seuratObj = seurat.tmp,
+  tcrPairs = cleanTCRpairs.df,
+  reductionName = "ref.umap_DS",
+  displayVariable = "cellType", # variable to color the UMAP by
+  arcLinewidth = 0.3,
+  arcAlpha = 0.8,
+  colorPalette = palCellType,
+  plotTitle = "Clone IDs with 2+ occurrences\nIAR", # string
+  colorString = "Cell Type", # string for the name of the legend
+  savePlot = TRUE,
+  plotName = "IAR_AirlinePlot_CellType",
+  minClones = 2)
+
+# Figure 5A
+# make subset Seurat object
+seurat.tmp <- subset(seuratAgSpecific, subset = stimulationFigures == "Polyclonal")
+
+# plot airline
+airlinePlot(seuratObj = seurat.tmp,
+  tcrPairs = cleanTCRpairs.df,
+  reductionName = "ref.umap_DS",
+  displayVariable = "cellType", # variable to color the UMAP by
+  arcLinewidth = 0.3,
+  arcAlpha = 0.8,
+  colorPalette = palCellType,
+  plotTitle = "Clone IDs with 2+ occurrences\nPolyclonal", # string
+  colorString = "Cell Type", # string for the name of the legend
+  savePlot = TRUE,
+  plotName = "Polyclonal_AirlinePlot_CellType",
+  minClones = 2)
+
+# Figure 5A
+# make subset Seurat object
+seurat.tmp <- subset(seuratAgSpecific, subset = stimulationFigures == "Microbial")
+
+# plot airline
+airlinePlot(seuratObj = seurat.tmp,
+  tcrPairs = cleanTCRpairs.df,
+  reductionName = "ref.umap_DS",
+  displayVariable = "cellType", # variable to color the UMAP by
+  arcLinewidth = 0.1,
+  arcAlpha = 0.3,
+  colorPalette = palCellType,
+  plotTitle = "Clone IDs with 2+ occurrences\nMicrobial", # string
+  colorString = "Cell Type", # string for the name of the legend
+  savePlot = TRUE,
+  plotName = "Microbial_AirlinePlot_CellType",
+  minClones = 2)
+
+# Figure 5A
+# make subset Seurat object
+seurat.tmp <- subset(seuratQCMergedCleanedDS, subset = cellType %in% c("Treg", "Tconv"))
+seurat.tmp <- subset(seurat.tmp, subset = stimulationFigures == "Microbial")
+
+# plot airline
+airlinePlot(seuratObj = seurat.tmp,
+  tcrPairs = cleanTCRpairs.df,
+  reductionName = "umap",
+  displayVariable = "cellType", # variable to color the UMAP by
+  arcLinewidth = 0.3,
+  arcAlpha = 0.8,
+  colorPalette = palCellType,
+  plotTitle = "Clone IDs with 2+ occurrences\nMicrobial (downsampled)", # string
+  colorString = "Cell Type", # string for the name of the legend
+  savePlot = TRUE,
+  plotName = "DS_Microbial_AirlinePlot_CellType",
+  minClones = 2)
+
+# inter-stimulation version
+
+# plot airline
+airlinePlot(seuratObj = seuratAgSpecific,
+  tcrPairs = cleanTCRAgSpecificInterStimPairs.df,
+  reductionName = "ref.umap_DS",
+  displayVariable = "cellType", # variable to color the UMAP by
+  arcLinewidth = 0.15,
+  arcAlpha = 0.8,
+  colorPalette = palCellType,
+  plotTitle = "Clone IDs with 2+ occurrences\nbetween stimulations", # string
+  colorString = "Cell Type", # string for the name of the legend
+  savePlot = TRUE,
+  plotName = "InterStimulation_AirlinePlot_CellType",
+  minClones = 2)
+```
+
+```{r FigureS6B}
+# Figure S6B TCR sharing upset plots
+# TCR sharing upset plot
+fontsize <- 8
+
+seurat.tmp <- subset(seuratAgSpecific, stimulationFigures == "Microbial")
+
+colors <- c(
+  scales::alpha("red", 0.5), scales::alpha("red", 0.5), scales::alpha("red", 0.5),
+  scales::alpha("blue", 0.5), scales::alpha("blue", 0.5),
+  scales::alpha("red", 0.5), scales::alpha("red", 0.5)
+)
+makeClusterExpansionUpsetPlots(seuratObject = seurat.tmp,
+  pairs = cleanTCRAgSpecificPairs.df,
+  clusterColumn = "seurat_clusters_DS",
+  title = "TCR sharing in RNAseq clusters\nMicrobial",
+  colors = colors,
+  filename = "microbial_TCR_Pair_Sharing_UpSet_Plot")
+
+makeClusterExpansionUpsetPlots(seuratObject = seurat.tmp,
+  pairs = cleanTCRAgSpecificPairs.df,
+  clusterColumn = "seurat_clusters_DS",
+  title = "TCR sharing in RNAseq clusters\nMicrobial",
+  colors = colors,
+  displayCounts = FALSE,
+  filename = "microbial_TCR_Pair_Sharing_UpSet_Plot_noCounts")
+
+seurat.tmp <- subset(seuratAgSpecific, stimulationFigures == "Polyclonal")
+
+colors <- c(
+  scales::alpha("red", 0.5), scales::alpha("red", 0.5),
+  scales::alpha("blue", 0.5), scales::alpha("blue", 0.5),
+  scales::alpha("red", 0.5)
+)
+makeClusterExpansionUpsetPlots(seuratObject = seurat.tmp,
+  pairs = cleanTCRAgSpecificPairs.df,
+  clusterColumn = "seurat_clusters_DS",
+  title = "TCR sharing in RNAseq clusters\nPolyclonal",
+  colors = colors,
+  filename = "polyclonal_TCR_Pair_Sharing_UpSet_Plot")
+
+makeClusterExpansionUpsetPlots(seuratObject = seurat.tmp,
+  pairs = cleanTCRAgSpecificPairs.df,
+  clusterColumn = "seurat_clusters_DS",
+  title = "TCR sharing in RNAseq clusters\nPolyclonal",
+  colors = colors,
+  displayCounts = FALSE,
+  filename = "polyclonal_TCR_Pair_Sharing_UpSet_Plot_noCounts")
+
+seurat.tmp <- subset(seuratAgSpecific, stimulationFigures == "IAR")
+
+colors <- c(
+  scales::alpha("red", 0.5), scales::alpha("red", 0.5),
+  scales::alpha("blue", 0.5), scales::alpha("blue", 0.5),
+  scales::alpha("red", 0.5)
+)
+makeClusterExpansionUpsetPlots(seuratObject = seurat.tmp,
+  pairs = cleanTCRAgSpecificPairs.df,
+  clusterColumn = "seurat_clusters_DS",
+  title = "TCR sharing in RNAseq clusters\nIAR",
+  colors = colors,
+  filename = "IAR_TCR_Pair_Sharing_UpSet_Plot")
+
+makeClusterExpansionUpsetPlots(seuratObject = seurat.tmp,
+  pairs = cleanTCRAgSpecificPairs.df,
+  clusterColumn = "seurat_clusters_DS",
+  title = "TCR sharing in RNAseq clusters\nIAR",
+  colors = colors,
+  displayCounts = FALSE,
+  filename = "IAR_TCR_Pair_Sharing_UpSet_Plot_noCounts")
+
+# inter-stimulation version
+colors <- c(
+  scales::alpha("red", 0.5), scales::alpha("red", 0.5), scales::alpha("red", 0.5),
+  scales::alpha("blue", 0.5), scales::alpha("blue", 0.5),
+  scales::alpha("red", 0.5), scales::alpha("red", 0.5)
+)
+makeClusterExpansionUpsetPlots(seuratObject = seuratAgSpecific,
+  pairs = cleanTCRAgSpecificInterStimPairs.df,
+  clusterColumn = "seurat_clusters_DS",
+  title = "TCR sharing in RNAseq clusters\nbetween stimulations",
+  colors = colors,
+  filename = "InterStimulation_TCR_Pair_Sharing_UpSet_Plot")
+
+makeClusterExpansionUpsetPlots(seuratObject = seuratAgSpecific,
+  pairs = cleanTCRAgSpecificInterStimPairs.df,
+  clusterColumn = "seurat_clusters_DS",
+  title = "TCR sharing in RNAseq clusters\nbetween stimulations",
+  colors = colors,
+  displayCounts = FALSE,
+  filename = "InterStimulation_TCR_Pair_Sharing_UpSet_Plot_noCounts")
+
+rm_tmp(ask = FALSE)
+```
+
+## TCR subsampled stats (shared by expansion + Inverse Simpson)
+```{r tcrSubsampledStats_compute}
+# Compute per-donor TCR statistics ONCE so the expansion-proportion and the
+# Inverse-Simpson figures use the *identical* pseudorandom downsamples (the
+# subsampling draws are generated inside a single function call per variant, and
+# both metrics are computed on the same draws). Mirrors the paired plate-sorted
+# reference (getSharingSubsampled / getDiversitySubsampled). The reference used
+# N = 1000 for sharing and N = 100 for diversity; because we need ONE shared set
+# of draws for both, a single N is used here (adjust nSubsample as desired).
+nSubsample <- 100
+
+tcrStats_nodown <- subsampledTcrStatsByChain(
+  seuratAgSpecific, cleanTCRAgSpecificPairs.df,
+  stimulations = c("IAR", "Microbial", "Polyclonal"),
+  chains = c("TRA", "TRB", "pair"),
+  N = nSubsample, downsample = FALSE, seed = 314)
+
+tcrStats_downsmp <- subsampledTcrStatsByChain(
+  seuratAgSpecific, cleanTCRAgSpecificPairs.df,
+  stimulations = c("IAR", "Microbial", "Polyclonal"),
+  chains = c("TRA", "TRB", "pair"),
+  N = nSubsample, downsample = TRUE, seed = 314)
+```
+
+## Tconv vs Treg NT-expansion proportion per donor (TRA / TRB / pair)
+```{r FigureS6C}
+# Figure S6C
+# Tconv vs Treg "expansion proportion" = proportion of cells whose chain
+# sequence is shared (appears >= 2x) per donor, across IAR / Microbial /
+# Polyclonal, for the TRA, TRB and alpha-beta pair chains. Quantity + subsampling
+# match the paired plate-sorted reference (see subsampledTcrStatsByChain) and the
+# SAME draws are reused for the Inverse-Simpson figures (shared tcrStats_*).
+# Significance: paired t-test on per-donor (Tconv - Treg) differences within each
+# (stim, studyGroup, chain), BH-adjusted; Padj shown in the colored HC/T1D header
+# (per-stim figures) or annotated per panel (3-stim grid). Per chain: one 3-stim
+# faceted figure + three per-stim figures, in both downsample variants.
+
+fontSize <- 8
+
+# HC / T1D display factor + palette derived from palStudyGroup.
+basePalStudyGroup <- if (exists("palStudyGroup")) palStudyGroup else
+  c("Control" = "lightblue", "T1D" = "orange")
+studyGroupRecode <- c("Control" = "HC", "T1D" = "T1D")
+studyGroup_levels <- c("HC", "T1D")
+palStudyGroup_local <- setNames(
+  basePalStudyGroup[names(studyGroupRecode)],
+  unname(studyGroupRecode[names(studyGroupRecode)])
+) # c(HC = lightblue, T1D = orange)
+
+stim_levels  <- c("IAR", "Microbial", "Polyclonal")
+chain_levels <- c("TRA", "TRB", "pair")
+
+# Plot helper: x = cellType, facet stim x studyGroup. padjInHeader places "Padj"
+# in the colored HC/T1D column header (per-stim figures); otherwise it is
+# annotated on each panel (3-stim grid, whose shared headers can't carry it).
+make_expansion_plot <- function(df, stats, stimsToShow, padjInHeader = FALSE) {
+  df_sub    <- df    %>% dplyr::filter(stimulationFigures %in% stimsToShow)
+  stats_sub <- stats %>% dplyr::filter(stimulationFigures %in% stimsToShow)
+
+  rowStripLevels <- intersect(levels(df_sub$stimulationFigures), stimsToShow)
+  colStripLevels <- intersect(studyGroup_levels,
+    as.character(unique(df_sub$studyGroupLabel)))
+  rowStripFills <- lapply(palStimulation[rowStripLevels], function(clr)
+    element_rect(fill = clr, color = "black"))
+  colStripFills <- lapply(palStudyGroup_local[colStripLevels], function(clr)
+    element_rect(fill = clr, color = "black"))
+
+  if (isTRUE(padjInHeader)) {
+    lab_map <- stats_sub %>%
+      dplyr::distinct(studyGroupLabel, adj_p, n_paired) %>%
+      dplyr::mutate(lab = ifelse(is.na(adj_p),
+        paste0(studyGroupLabel, "\n(n=", n_paired, ", ns)"),
+        paste0(studyGroupLabel, "\nPadj = ", signif(adj_p, 3))))
+    colLab <- setNames(lab_map$lab, as.character(lab_map$studyGroupLabel))
+    facetLabeller <- ggplot2::labeller(studyGroupLabel = colLab)
+  } else {
+    facetLabeller <- ggplot2::label_value
+  }
+
+  p <- ggplot(df_sub, aes(x = cellType, y = propExpandedNT)) +
+    geom_boxplot(outlier.shape = NA, fill = NA, color = "black") +
+    geom_line(aes(group = donorIdFigures), color = "black", alpha = 0.6) +
+    geom_point(size = 1.5, color = "black") +
+    ggh4x::facet_grid2(stimulationFigures ~ studyGroupLabel,
+      labeller = facetLabeller,
+      strip = ggh4x::strip_themed(
+        background_x = colStripFills,
+        background_y = rowStripFills
+      )
+    ) +
+    labs(
+      x = NULL,
+      y = "Proportion of cells with shared\nNT sequence (per donor)"
+    ) +
+    theme_classic(base_size = fontSize) +
+    theme(
+      panel.border = element_rect(color = "black", fill = NA, size = 0.5),
+      strip.text = element_text(size = fontSize),
+      axis.text = element_text(size = fontSize, color = "black"),
+      axis.title = element_text(size = fontSize)
+    )
+
+  if (!isTRUE(padjInHeader)) {
+    ann_df <- df_sub %>%
+      dplyr::group_by(stimulationFigures, studyGroupLabel) %>%
+      dplyr::summarise(ann_y = max(propExpandedNT, na.rm = TRUE) * 1.1 + 0.02,
+        .groups = "drop") %>%
+      dplyr::left_join(stats_sub,
+        by = c("stimulationFigures", "studyGroupLabel")) %>%
+      dplyr::mutate(label = ifelse(is.na(adj_p),
+        paste0("ns (n=", n_paired, ")"),
+        paste0("Padj = ", signif(adj_p, 3))))
+    p <- p + geom_text(
+      data = ann_df,
+      aes(x = 1.5, y = ann_y, label = label),
+      inherit.aes = FALSE, color = "black", size = 2.8
+    )
+  }
+  p
+}
+
+variants <- list(nodownsample = tcrStats_nodown, downsampled = tcrStats_downsmp)
+for (variantTag in names(variants)) {
+  statsAll <- variants[[variantTag]] %>%
+    dplyr::mutate(
+      stimulationFigures = factor(stimulationFigures, levels = stim_levels),
+      cellType = factor(cellType, levels = c("Tconv", "Treg")),
+      chain = factor(chain, levels = chain_levels),
+      studyGroupLabel = factor(
+        dplyr::recode(as.character(studyGroup), !!!studyGroupRecode),
+        levels = studyGroup_levels)
+    )
+
+  write.csv(
+    statsAll,
+    file.path(dataOutputDir, paste0(filenameSuffix,
+      "expandedNT_TregVsTconv_perDonor_", variantTag, ".csv")),
+    row.names = FALSE
+  )
+
+  # Paired t-test on per-donor (Tconv - Treg) diffs per (stim, studyGroup, chain),
+  # BH-adjusted across all such tests in this variant.
+  test_results <- pairedDiffTest(statsAll, "propExpandedNT",
+      c("stimulationFigures", "studyGroup", "chain")) %>%
+    dplyr::mutate(
+      stimulationFigures = factor(stimulationFigures, levels = stim_levels),
+      chain = factor(chain, levels = chain_levels),
+      studyGroupLabel = factor(
+        dplyr::recode(as.character(studyGroup), !!!studyGroupRecode),
+        levels = studyGroup_levels)
+    )
+
+  cat("\n=== expandedNT_TregVsTconv (", variantTag, ") Padj ===\n", sep = "")
+  print(test_results %>% dplyr::select(stimulationFigures, studyGroup, chain,
+    n_paired, p_val, adj_p))
+
+  for (ch in chain_levels) {
+    df_ch    <- statsAll     %>% dplyr::filter(chain == ch)
+    stats_ch <- test_results %>% dplyr::filter(chain == ch)
+
+    # 3-stim faceted figure (padj annotated on panels)
+    savePlot(
+      plot = make_expansion_plot(df_ch, stats_ch, stim_levels, padjInHeader = FALSE),
+      plotDir = plotDir,
+      filename = paste0("expandedNT_TregVsTconv_", ch, "_faceted_", variantTag),
+      height = 7, width = 5.5, units = "in", dpi = 600, formats = c("pdf", "png")
+    )
+
+    # Per-stimulation figures (Padj in HC/T1D header)
+    for (stim in stim_levels) {
+      savePlot(
+        plot = make_expansion_plot(df_ch, stats_ch, stim, padjInHeader = TRUE),
+        plotDir = plotDir,
+        filename = paste0("expandedNT_TregVsTconv_", ch, "_", stim, "_", variantTag),
+        height = 3.5, width = 4, units = "in", dpi = 600, formats = c("pdf", "png")
+      )
+    }
+  }
+}
+
+rm_tmp(ask = FALSE)
+gc()
+```
