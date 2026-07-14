@@ -6,6 +6,10 @@ editor_options:
   chunk_output_type: console
 ---
 
+Project Summary
+------
+
+FIXME
 
 ```{r setup, echo=FALSE, message=FALSE, warning=FALSE}
 
@@ -13,8 +17,7 @@ library(mongolite)
 library(apird)
 library(stringr)
 
-# Download data from in-house database
-if(FALSE){
+  if(FALSE){
   libs <- getProjectLibs("P390", searchType = "regex")
   anno <- getAnno(libs)
   rownames(anno) <- anno$libid
@@ -44,17 +47,22 @@ if(FALSE){
     k <- k+1
   }
   
+  #counts <- t(getGeneCounts(metrics$libid[!is.na(metrics$fastq_total_reads)]))
+  #colnames(counts) <- str_extract(colnames(counts), "lib[0-9]+")
   design <- design[!is.na(design$fastq_total_reads),]
   colnames(counts) <- str_extract(colnames(counts), "lib[0-9]+")
   rownames(design) <- design$libid
 
+  #save.image("~/Library/CloudStorage/Box-Box/P390_Treg_Tconv/bin/2023-03-27/P390_RNASeq6.RData")
 }
+library(readxl)
 
 demo <- data.frame(read_xlsx("../../data/GenLIMS Samples_P390_demographics.xlsx"))
 rownames(demo) <- demo$Proj.Sub
 design$donorID <- demo[design$project, "Donor.ID"]
 
-
+#load("P390_RNASeq9.RData")
+library(readxl)
 library(knitr)
 library(dplyr)
 library(Seurat)
@@ -80,7 +88,6 @@ library(ggthemes)
 library(ggbeeswarm)
 library(viridis)
 library(stringr)
-library(readxl)
 library(tcrGraph)
 #library(ggforce)
 #Load Matt's library which includes a function for making barcode plots
@@ -105,7 +112,9 @@ pgrep <- function(s,l){
 if(TRUE){
   oldlibs28 <- design$libid[ design$project == "P390-28" & design$libnum <= 85622  ]
   newlibs28 <- design$libid[ design$project == "P390-28" & design$libnum > 85622  ]
+
 }
+
 ```
 
 ```{r get and annotate TCRs}
@@ -137,6 +146,12 @@ tcrs$chain[ grepl("TRD",tcrs$v_gene)] <- "TRG"
 
 tcrs$donorID <- anno[tcrs$libid, "donorID"]
 
+p91libs <- getProjectLibs("P91", searchType = "regex")
+p168libs <- getProjectLibs("P168", searchType = "regex")
+p474libs <- getProjectLibs("P474", searchType = "regex")
+
+tcrs168_91_474 <-getTcrs( c(p91libs,p168libs,p474libs), returnLibsWithIssues=TRUE)
+
 ### Identify possible doublets and put them in the tcrs
 betaDoublets <- tcrs[ tcrs$chain == "TRB",]
 betaDoublets <- unique( betaDoublets$libid[ duplicated(betaDoublets$libid)])
@@ -144,11 +159,13 @@ betaDoublets <- unique( betaDoublets$libid[ duplicated(betaDoublets$libid)])
 alphaTab <- table( tcrs[ tcrs$chain == "TRA", "libid"] )
 alphaTriplets <- names(alphaTab)[ alphaTab > 2]
 
+
 ```
 
 ```{r 10/24/09 Bubble Plot of Treg Flow Markers}
 
 # In the short term I’m hoping to provide more context on the annotation of the Tregs; I was wondering about the index sort markers CD45RA and CD45RO, as well as CD38, CD69, CD137, CD25, PD-1 and TIGIT.
+
 
 flow9 <- data.frame( read_xlsx("../../data/2024-10-24/P390 index sort Treg cell types_Final.xlsx") )
 markerCols <- colnames(flow9)[ grepl("Geometric.Mean..", colnames(flow9))]
@@ -247,6 +264,7 @@ ggplot(clusterMfiMeansLong , aes(x=marker,y=cluster,color=value)) + geom_point(s
 ggplot(flow9,aes(x=Geometric.Mean..CD45RA.,y=Geometric.Mean..CD45RO.)) + geom_point()
 
 ggplot(flow9,aes(x=x,y=y,color=Geometric.Mean..CD45RO.)) 
+
 
 ### Make plot of CD45RA and CD45RO
 ptab <- table(flow9$Proj.Sub)
@@ -760,6 +778,7 @@ tregTconvSharingNt <- function(d, mismatchedlibs = c(), sameDonor=TRUE){
   return(tregtconv)
 }
 
+so <- readRDS("soCombined.RDS")
 seuratMismatchedLibs <- unique( so$libid[ so$mismatched == "mismatched"] )
 ashared <- tregTconvSharing(a,seuratMismatchedLibs)
 bshared <- tregTconvSharing(b,seuratMismatchedLibs)
@@ -1087,6 +1106,15 @@ gene_key_pc <- counts_pc[,1:3] #First three columns contain annotation informati
 #counts_pc <- counts_pc[,4:97] #The remaining columns contain counts information 
 counts_pc <- counts_pc[,4:ncol(counts_pc),] #The remaining columns contain counts information \
 rownames(counts_pc) <- gene_key_pc[,1]
+
+if(FALSE){
+  counts_pc_hgnc <- counts_pc
+  counts_pc_hgnc <- counts_pc_hgnc[rev(order(rowSums(counts_pc_hgnc))),]
+  counts_pc_hgnc <- counts_pc_hgnc[!duplicated(ens2hgnc[rownames(counts_pc_hgnc)]),]
+  rownames(counts_pc_hgnc) <- ens2hgnc[ rownames(counts_pc_hgnc)]
+  write.table(t(counts_pc_hgnc), "../../data/P390_hgnc_counts.tsv",col.names=NA,sep="\t",quote=FALSE)
+}
+f
 
 ens2hgnc <- gene_key[!duplicated(gene_key$Ensembl.Gene.ID),"HGNC.symbol"]
 names(ens2hgnc) <- gene_key[!duplicated(gene_key$Ensembl.Gene.ID),"Ensembl.Gene.ID"]
@@ -1416,7 +1444,7 @@ bulk_pc_norm <- normalize_counts(bulk[g,],"tmm")
 designBulk <- data.frame( t(sapply(colnames(bulk_pc_norm), function(s) strsplit(s,"_")[[1]])) )
 colnames(designBulk) <- c("donorID","type","cluster")
 designBulk$studyGroup <- designByDonor[ designBulk$donorID,"studyGroup"]
-
+saveRDS(list(bulk_pc_norm=bulk_pc_norm,designBulk=designBulk),"DonorClusterPseudobulk.RDS")
 #design_mat <- model.matrix(~0+id+FOXP3+cdr+group,data=designByProject)
 design_mat <- model.matrix(~0+studyGroup:type,data=designBulk)
 colnames(design_mat) <- gsub("studyGroup","",gsub("type","",colnames(design_mat)))
@@ -1878,7 +1906,7 @@ colnames(design_mat) <- gsub("studyGroup","",colnames(design_mat))
 colnames(design_mat) <- gsub("type","",colnames(design_mat))
 colnames(design_mat) <- gsub("\\:","_",colnames(design_mat))
 
-
+saveRDS(list(bulk_pc_norm=bulk_pc_norm,designBulk=designBulk),"DonorSortPseudobulk.RDS")
 cont.matrix <- makeContrasts(
      T1D_treg = T1D_Treg-Control_Treg,
      T1D_tconv = T1D_Tconventional-Control_Tconventional,
@@ -3036,9 +3064,7 @@ ix <- sharedStats$chain == "TRB"
 diffs <- sharedStats$TconventionalDiv[ix]-sharedStats$TregDiv[ix]
 diffs <- diffs[!is.na(diffs)]
 pvalb <- t.test(diffs)$p.value
-
 print( t.test(diffs)$p.value )
-
 
 sharedStatsLong <- reshape2::melt(sharedStats[,c("did","studyGroup","chain","TconventionalDiv","TregDiv")], id.vars=c("did","studyGroup","chain"))
 colnames(sharedStatsLong) <- c("did","studyGroup","chain","CD4Type","diversity")
@@ -3636,6 +3662,9 @@ ggplot( cds_coords, aes(x=x,y=y,color=originalCluster)) + geom_point() + scale_c
 ### Genes to plot
 gs <- c("FOXP3","IKZF2","IL2RA","IL2RA","LRRC32","CCR7","SELL","CD27","CD69","TNFRSF4","TNFRSF9","CTLA4","ICOS","TIGIT","LAG3","ENTPD1","TGFB1","EBI3","IL10","ENTPD1","TGFB1","CCR6","CXCR3","CXCR5","GATA3","RORC","TBX21")
 
+treg_coords <- data.frame( Embeddings(soTregs, reduction = "umap") )
+treg_coords <- cbind(treg_coords,soTregs@meta.data)
+treg_coords[,c("x","y")] <- treg_coords[,c("umap_1","umap_2")]
 for( g in gs ){
   ens <- names(ens2hgnc)[ens2hgnc == g]; ens <- ens[!is.na(ens) & grepl("ENS",ens)]
 #for( ens in pseudotimeEns ){
@@ -4813,7 +4842,7 @@ for( nclust in nclusts ){
   # Order the features so they're cluster
   ens  <- names(ens2hgnc)[ens2hgnc %in% tregMarkers2 & names(ens2hgnc) %in% rownames(counts_pc_norm)]
     ## Cluster genes
-  tp <- t(scale(t(log2(1+counts_pc_norm[ens, soTconvs$libid]))))
+  tp <- t(scale(t(log2(1+counts_pc_norm[ens, soTregs$libid]))))
   dist_matrix <- dist(tp)
   # Perform hierarchical clustering
   hc <- hclust(dist_matrix)
@@ -5895,6 +5924,7 @@ junctionTable <- table(tcrs$junction[tcrs$libid %in% combinedDf$libid])
 ### Generate igraph
 thresh <- "24"
 chain <- "Alpha"
+chain <- "Beta"
 print(thresh)
 
 if( chain == "Beta" ){
@@ -7240,76 +7270,1113 @@ for( lib in libs ){
 }
 a <- subpairs[subpairs$libid == "lib81299",]
 
+z <- unique(soFiltered$project)
+z <- z[order(as.numeric(sapply(z, function(s) strsplit(s,"-")[[1]][2]) ) )]
+
 ```
 
-```{r 09/11/25 try out Milo for differential neighborhoods T1D v HC }
-library(miloR)
-library(SingleCellExperiment)
-library(scater)
-library(scran)
-library(dplyr)
-library(patchwork)
+```{r 09/18/22 Output For GEO}
+libs <- design$libid[ design$project %in% soFiltered$project]
+libs <- libs[order(libs)]
+counts <- readRDS("../../data/P390Counts.RDS")
+rownames(counts) <- sapply( rownames(counts), function(s) strsplit(s,"_")[[1]][1] )
+counts <- counts[libs,]
+#write.table(counts,"../../data/P390_gene_counts.txt",quote=FALSE,sep="\t",col.names=NA)
 
-if(FALSE){ # Use Simulated Data
-  data("sim_trajectory", package = "miloR")
-  ## Extract SingleCellExperiment object
-  traj_sce <- sim_trajectory[['SCE']]
-  ## Extract sample metadata to use for testing
-  traj_meta <- sim_trajectory[["meta"]]
-  ## Add metadata to colData slot
-  colData(traj_sce) <- DataFrame(traj_meta)
-  colnames(traj_sce) <- colData(traj_sce)$cell_id
-} else{
-  soTconvs@meta.data$Sample <- soTconvs@meta.data$donorID
-  soTconvs@meta.data$Condition <- soTconvs@meta.data$studyGroup
-  traj_sce <- as.SingleCellExperiment( soTconvs)
+md5sums <- read.table("../../data/2025-08-07/P390md5sums.txt")
+md5sums$file <- gsub("fastqLinks/","",md5sums$V2)
+md5sums$libid <- sapply( md5sums$file, function(s) strsplit(s,"_")[[1]][1] )
+#write.table(md5sums[,c("file","V1")],"../../data/P390md5sumsFormatted.txt",quote=FALSE,sep="\t",col.names=FALSE,row.names=FALSE)
 
-  soTregs@meta.data$Sample <- soTregs@meta.data$donorID
-  soTregs@meta.data$Condition <- soTregs@meta.data$studyGroup
-  traj_sce <- as.SingleCellExperiment( soTregs)
+df <- design[ design$project %in% soFiltered$project,]
+df <- df[order(df$libid),]
+df$projectNum <- as.numeric( gsub("P390-","",df$project))
+df <- df[order(df$projectNum),]
+projects <- unique(df$project)
+libsByProj <- lapply( projects, function(proj) df$libid[ df$project == proj] ); names(libsByProj) <- projects
+libsByProj <- lapply(libsByProj, function(l) md5sums$file[ md5sums$libid %in% l])
+maxlibs <- max(sapply(libsByProj,length))
+libsByProj <- lapply(libsByProj, function(l) c(l,rep("",maxlibs-length(l))))
+libsByProj <- do.call(rbind,libsByProj)
+df <- df[!duplicated(df$project),]
+libsByProj <- libsByProj[df$project,]
+df$libraryName <- paste0("Library group ",1:nrow(df))
+df$title <- paste( df$donorID, df$CD4Type, df$project)
+df$libraryStrategy <- c("Plate scRNASeq")
+df$organism <- "Human"
+df$tissue <- "blood"
+df$cellLine <- "PBMC"
+df$cellType <- df$CD4Type
+df$molecule <- "total RNA"
+df$end <- "paired-end"
+df$instrumentModel <- "Illumina NextSeq 2000"
+df$processedDataFile <- "P390_gene_counts.txt"
+cols <- c("libraryName","title","libraryStrategy","organism","tissue","cellLine","cellType","studyGroup","molecule","end","instrumentModel","processedDataFile")
+df <- df[,cols]
+
+write.table(df,"../../data/P390MetadataForGEO.txt",quote=FALSE,col.names=TRUE,row.names=FALSE,sep="\t")
+write.table(libsByProj,"../../data/P390LibraryFastqsPerProject.txt",quote=FALSE,col.names=FALSE,row.names=FALSE,sep="\t")
+
+fastqnames <- data.frame( md5sums[ grepl("R1",md5sums$file),"file"], md5sums[ grepl("R2",md5sums$file),"file"] )
+colnames(fastqnames) <- c("file name 1","file name 2")
+write.table(fastqnames,"../../data/P390fastqnames.txt",quote=FALSE,col.names=TRUE,row.names=FALSE,sep="\t")
+
+subtcrs <- tcrs[ tcrs$libid %in% md5sums$libid, c(colnames(tcrs)[1:19],"donorID")]
+write.table(subtcrs,"../../data/P390TCRs.txt",quote=FALSE,col.names=TRUE,row.names=FALSE,sep="\t")
+
+```
+
+
+```{r 10/21/25 Compare TRUST4 to Mixcr for P390}
+
+trustdir <- "../../data/2025-10-21/P390SampleTRUST4/"
+trustfiles <- list.files(trustdir); trustfiles <- paste0( trustdir, trustfiles[ grepl("report.tsv",trustfiles)] )
+trustList <- lapply(trustfiles, function(f) read.table(f, comment.char = "",header=TRUE) ); names(trustList) <- trustfiles
+for( f in trustfiles ){
+  libid = strsplit(f,"_")[[1]][2]
+  if( nrow( trustList[[f]] ) > 0 ){
+    trustList[[f]]$libid <- libid
+  }
+}
+trustDf <- do.call( rbind, trustList ); rownames(trustDf) <- 1:nrow(trustDf)
+trustDf$chain <- sapply(trustDf$V, function(s) substr(s,1,3))
+trustDf <- trustDf[ trustDf$CDR3aa != "out_of_frame",]
+trustDf$junction <- trustDf$CDR3aa
+
+subTcrs <- tcrs[ tcrs$libid %in% trustDf$libid,]
+subTcrs$libJunction <- paste( subTcrs$libid, subTcrs$junction )
+trustDf$libJunction <- paste( trustDf$libid, trustDf$junction )
+trustDf <- trustDf[!grepl("_",trustDf$CDR3aa),]
+trustDf$method <- "TRUST4"
+subTcrs$method <- "MIXCR"
+
+comboDf <- rbind( subTcrs[,c("libid","junction","chain","method")], trustDf[,c("libid","junction","chain","method")])
+comboDf <- comboDf[ comboDf$chain %in% c("TRA","TRB"),]
+comboDf$libidJunctionMethod <- paste( comboDf$libid, comboDf$junction, comboDf$chain ,comboDf$method,sep="_")
+comboDf$libidJunction <- paste( comboDf$libid, comboDf$junction, comboDf$chain,sep="_")
+df <- comboDf[!duplicated(comboDf$libidJunctionMethod),]
+agg <- aggregate(df$method, list(df$libidJunction), FUN=paste, collapse= ", "); colnames(agg) <- c("id","method")
+agg[,c("libid","junction","chain")] <- t(sapply(agg$id, function(s) strsplit(s,"_")[[1]]))
+agg$project <- design[ agg$libid,"project"]
+table(agg$method, agg$chain)
+ggplot(agg, aes(x=gsub("P390-","",project),fill=method)) + geom_histogram(stat='count') + facet_wrap(~chain) + scale_fill_manual( values=c("MIXCR, TRUST4"="purple","TRUST4"="red") ) + labs(fill="found\nby",x="P390 subproject")
+
+aM <- subTcrs[ subTcrs$chain == "TRA",]
+bM <- subTcrs[ subTcrs$chain == "TRB",]
+aT <- trustDf[ trustDf$chain == "TRA",]
+bT <- trustDf[ trustDf$chain == "TRB",]
+
+#### P589
+getFullNtSequence <- function(a){
+  return( paste0(a$fwr1_nt, a$cdr1_nt, a$fwr2_nt, a$cdr2_nt, a$fwr3_nt, a$cdr3_nt, a$fwr4_nt) )
+}
+anno1 <- read.csv("../../data/2025-05-13/P589_10X_TCR_Data/all_contig_annotations_pool589-1_1.csv")
+anno1$full_nt_sequence <- getFullNtSequence(anno1)
+
+submd <- md589[ grepl("1_",md589$barcode),]
+submd$barcode <- gsub("1_","",submd$barcode)
+rownames(submd) <- gsub("1_","",submd$barcode)
+subanno1 <- anno1[ anno1$barcode %in% submd$barcode,]
+subanno1[,c("donorId","stimulation")] <- submd[ subanno1$barcode,c("donorId","stimulation")]
+subanno1$method <- "TCRSeq"
+subanno1$junction <- subanno1$cdr3
+
+### Load and parse 
+trust4P589_1 <- read.table("../../data/2025-10-21/TRUST_sample_alignments_barcode_report.tsv", comment.char = "",header=TRUE)
+trust4P589_1[,c("donorId","stimulation")] <- submd[ trust4P589_1$barcode,c("donorId","stimulation")]
+cols <- colnames(trust4P589_1)[ grepl("chain",colnames(trust4P589_1))]
+aaIxes <- c(6,15,24)
+col <- trust4P589_1[,"chain1"]
+parseColumn <- function(col,barcodes){
+  aaCols <- c(6,15,24)
+  chainCols <- c(1,10,19)
+  i <- which( !col=="*" & ! grepl("out_of_frame",col) )
+  bcs <- barcodes[i]
+  col <- col[i]
+  lists <- lapply(col, function(s) strsplit(s,",")[[1]] )
+  chains <- sapply(lists, function(l) substr(gsub("0;","",l[chainCols[chainCols<length(l)]]),1,3))
+  lists <- lapply(lists, function(l) l[aaCols[aaCols <= length(l)]] )
+  for(i in 1:length(lists) ){
+    lists[[i]] <- data.frame( barcode = bcs[[i]], junction = lists[[i]], chain = chains[[i]] )
+  }
+  df <- do.call(rbind,lists)
+}
+barcodes <- trust4P589_1$X.barcode
+trust4list <- apply( trust4P589_1[,cols], 2, function(col) parseColumn(col,barcodes) )
+trust589 <- do.call(rbind,trust4list)
+trust589 <- trust589[ trust589$chain %in% c("TRB","TRA"),]
+trust589 <- trust589[ trust589$barcode %in% submd$barcode,]
+trust589[,c("donorId","stimulation")] <- submd[ trust589$barcode,c("donorId","stimulation")]
+trust589$method <- "TRUST4"
+
+
+comboDf <- rbind( subanno1[,c("barcode","junction","chain","method")], trust589[,c("barcode","junction","chain","method")])
+comboDf <- comboDf[ comboDf$chain %in% c("TRA","TRB"),]
+comboDf <- comboDf[!grepl("_",comboDf$junction),]
+comboDf$barcodeJunctionMethod <- paste( comboDf$barcode, comboDf$junction, comboDf$chain ,comboDf$method,sep="_")
+comboDf$barcodeJunction <- paste( comboDf$barcode, comboDf$junction, comboDf$chain,sep="_")
+df <- comboDf[!duplicated(comboDf$barcodeJunctionMethod),]
+agg <- aggregate(df$method, list(df$barcodeJunction), FUN=paste, collapse= ", "); colnames(agg) <- c("id","method")
+agg[,c("barcode","junction","chain")] <- t(sapply(agg$id, function(s) strsplit(s,"_")[[1]]))
+agg <- agg[agg$junction != "",]
+table(agg$method, agg$chain)
+agg[,c("donorId","stimulation")] <- submd[ agg$barcode, c("donorId","stimulation")]
+ggplot(agg, aes(x=as.numeric(as.factor(donorId)),fill=method)) + geom_histogram(stat='count') + facet_wrap(~chain+stimulation,scales="free") + scale_fill_manual( values=c("TCRSeq"="blue","TCRSeq, TRUST4"="purple","TRUST4"="red") ) + labs(fill="found\nby",x="donor")
+
+subdf <- df[!duplicated(df$barcode),]
+bins <- rev(seq(3000,27000,3000))
+subdf$rnaCountBin <- paste0(">=",max(bins))
+for(m in bins){
+  subdf$rnaCountBin[ subdf$nCount_RNA < m ] <- paste0( m-3000,"-",m-1)
+}
+subdf$rnaCountBin <- factor( subdf$rnaCountBin, levels= rev(c(paste0(">=",max(bins) ),sapply(bins, function(m) paste0( m-3000,"-",m-1) ) ) ) )
+rownames(subdf) <- subdf$barcode
+agg$rnaCountBin <- subdf[ agg$barcode,"rnaCountBin"]
+agg$donorBin <- paste( agg$donorId, agg$rnaCountBin)
+donorBinTab <- table(agg$donorBin)
+
+subagg <- agg[ grepl("TCRSeq",agg$method),]
+tab <- data.frame( table( subagg$donorId, subagg$rnaCountBin, subagg$method)); colnames(tab) <- c("donorId","rnaCountBin","method","count")
+tab$donorBin <- paste(tab$donorId,  tab$rnaCountBin)
+tab$prop <- tab$count/donorBinTab[ tab$donorBin]
+# ggplot(tab, aes(x=as.numeric(as.factor(donorId)),fill=method,y=prop)) + geom_bar(stat='identity',position='stack') + facet_wrap(~rnaCountBin,scales="free",nrow=2) + scale_fill_manual( values=c("TCRSeq"="blue","TCRSeq, TRUST4"="purple","TRUST4"="red") ) + labs(fill="found\nby",x="donor")
+ggplot(tab[tab$method =="TCRSeq, TRUST4",], aes(x=rnaCountBin,y=prop,color=donorId)) + geom_line(aes(group=donorId)) + labs(y="proportion found by TRUST4",x="GEX UMIs",title="TCRSeq CDR3 AA Sequences (alpha and beta)\nFound By TRUST4") + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+
+```
+
+```{r 01/29/26 Try Reclustering P390's CD4 Effector Memory}
+# soTconvs$memory <- ifelse( soTconvs$libid %in% naivelibs,"naive","memory") 
+soTconvs$memory <- ifelse( as.character( soTconvs$seurat_clusters) %in% c("0","1"),"naive","memory") 
+
+## Get two clusters that correspond to naive and memory, so then we can subcluster
+soMemoryTconvs <- soTconvs
+DimPlot(soMemoryTconvs)
+clusterRes <- 0.11#0.35
+soMemoryTconvs <- FindClusters(soMemoryTconvs, resolution = clusterRes, verbose = FALSE)
+DimPlot(soMemoryTconvs,
+  label = TRUE,
+  repel = TRUE,
+  group.by = "seurat_clusters")
+
+soTconvs$memory <- ifelse( soMemoryTconvs$seurat_clusters == "1","naive","memory") 
+nDim <- 10
+nNeighbors <- 20
+clusterRes <- 0.2#0.35
+clusterRes <- 0.4
+# saveRDS(soMemoryTconvs,"soMemoryTconvs.RDS")
+plotDir <- "../../data/2026-02-26/"
+for( tconvSubset in c("naive","memory") ){
+  print(tconvSubset)
+  soMemoryTconvs <- subset(x = soTconvs, subset = memory == tconvSubset)
+  # soMemoryTconvs <- soTconvs
+  #DimPlot(soMemoryTconvs)
+
+  soMemoryTconvs <- RunPCA(object = soMemoryTconvs, npcs = 30, verbose = FALSE)
+  soMemoryTconvs <- FindNeighbors(soMemoryTconvs, reduction = "pca", dims = 1:nDim, k.param=nNeighbors )
+  soMemoryTconvs <- FindClusters(soMemoryTconvs, resolution = clusterRes, verbose = FALSE)
+  soMemoryTconvs <- RunUMAP(soMemoryTconvs, dims = 1:nDim, verbose = FALSE)
+  nclust <- length(unique(soMemoryTconvs$seurat_clusters))
+  png( paste0(plotDir,tconvSubset,"_UMAP_",nclust,"cluster.png"),width=400,height=400)
+  p <- DimPlot(soMemoryTconvs) + labs(x="UMAP 1",y="UMAP 2",title=tconvSubset)
+  print(p)
+  dev.off()
+  
+  # Print the DotPlot
+  nclust <- length(unique(soMemoryTconvs$seurat_clusters))
+  fontSize=12
+   dotPlot.tmp <- DotPlot(soMemoryTconvs, features = tconvMarkers2) +
+    theme(axis.text.x = element_text(angle = 60, hjust = 1, size = 8),
+      text = element_text(size = fontSize),
+      axis.text.y = element_text(size = fontSize),
+      axis.title.y = element_text(size = fontSize),
+      legend.text = element_text(size = fontSize),
+      legend.title = element_text(size = fontSize),
+      strip.text = element_text(size = fontSize),
+      plot.title = element_text(size = fontSize)) + labs(title=paste0(nclust," Tconv ",tconvSubset," Clusters Top Markers"))
+  nclust <- length(unique(soMemoryTconvs$seurat_clusters))
+  # pdf(file.path(plotDir, paste0("Tconvs",nclust, "_clusterDefiningGenesDotPlot_top10genes.pdf")), height = 4, width = 12)
+  png(file.path(plotDir, paste0(tconvSubset,nclust, "_curatedMarkers.png")), height = 260, width = 500)
+  ens  <- names(ens2hgnc)[ens2hgnc %in% tconvMarkers2 & names(ens2hgnc) %in% rownames(counts_pc_norm)]
+  ## Cluster genes
+  tp <- t(scale(t(log2(1+counts_pc_norm[ens, soMemoryTconvs$libid]))))
+  dist_matrix <- dist(tp)
+  # Perform hierarchical clustering
+  hc <- hclust(dist_matrix)
+  # Get the order of columns based on hierarchical clustering
+  column_order <- hc$order
+  geneNames <- as.character( ens2hgnc[ ens[column_order]] )
+  print(dotPlot.tmp + scale_color_gradient2(low = "blue", mid = "white", high = "red"))
+  dev.off()
+
+  ## Plot the non-curated markers
+  clustsMarkers <- FindAllMarkers(soMemoryTconvs)
+  # Get top markers per cluster
+  clustsMarkersTconvsPos <- clustsMarkers[clustsMarkers$avg_log2FC > 0,]
+  ngenes <- 10
+  clustsMarkersTconvsPos <- unique( do.call( c, lapply( unique(clustsMarkersTconvsPos$cluster ), function( clust ) clustsMarkersTconvsPos$gene[ clustsMarkersTconvsPos$cluster == clust][1:ngenes] ) ) )
+    fontSize=10
+  dotPlot.tmp <-  DotPlot(soMemoryTconvs, features = clustsMarkersTconvsPos) +
+    theme(axis.text.x = element_text(angle = 60, hjust = 1, size = 8),
+      text = element_text(size = fontSize),
+      axis.text.y = element_text(size = fontSize),
+      axis.title.y = element_text(size = fontSize),
+      legend.text = element_text(size = fontSize),
+      legend.title = element_text(size = fontSize),
+      strip.text = element_text(size = fontSize),
+      plot.title = element_text(size = fontSize)) + labs(title=paste0(nclust," Tconv ",tconvSubset," Clusters Top Markers"))
+  png(file.path(plotDir, paste0(tconvSubset,nclust, "_top10Markers.png")), height = 260, width = 600)
+  print(dotPlot.tmp + scale_color_gradient2(low = "blue", mid = "white", high = "red"))
+  dev.off()
+  
+  mem_coords <- data.frame( Embeddings(soMemoryTconvs, reduction = "umap") )
+  mem_coords[, colnames(soMemoryTconvs@meta.data)] <- soMemoryTconvs@meta.data
+  ggplot( mem_coords, aes(x=umap_1,y=umap_2,color=seurat_clusters)) + geom_point(size=0.5) + labs( title=paste0(tconvSubset," Tconv\n",nDim,"-dim, ", nNeighbors, " neighbors, ", clusterRes,"-res"))
+  ggplot( mem_coords, aes(x=umap_1,y=umap_2,color=studyGroup)) + geom_point(size=0.5) + labs( title=paste0(nDim,"-dim, ", nNeighbors, " neighbors, ", clusterRes,"-res"))
+  
+  # Numbers of Tconv and Treg by HC and T1D with the new Seurat clustering
+  df <- mem_coords; df$cluster <- df$seurat_clusters
+  clusterTab <- data.frame( table(df$cluster, df$donorID) ); colnames(clusterTab) <- c("cluster","donorID","count")
+  clusterTab$studyGroup <- designBySrid[ clusterTab$donorID,"studyGroup"]
+  donorTab <- table(df$donorID)
+  clusterTab$prop <- clusterTab$count/donorTab[clusterTab$donorID]
+  clusterTab$prop[is.na(clusterTab$prop)] <- 0
+  clusterTab$logit <- logitTransform( clusterTab$prop)
+  clusters <- unique(clusterTab$cluster)
+  pvals <- data.frame( cluster=clusters, P.Value = sapply( clusters, function(tc) clusterTab %>% filter(cluster == tc) %>% t.test(logit ~ studyGroup, data = .) %>% .$p.value ) )
+  pvals$adj.P.Val <- p.adjust( pvals$P.Value, method="BH")
+  pvals <- pvals[order(pvals$P.Value),]
+  rownames(pvals) <- pvals$cluster
+  clusterTab$studyGroup <- ifelse(clusterTab$studyGroup == "T1D","T1D","HC")
+  clusterTab$anno <- paste0( clusterTab$cluster,"\n","p: ", signif(pvals[ clusterTab$cluster, "P.Value"],3))
+  #pdf("../../data/2025-02-10/PaperFigures/SeuratClusterProportions_Tconventional_ByT1D.pdf",width=8,height=5)
+  png(paste0(plotDir,tconvSubset,"_proportionBoxplot.png"),width=700,height=400)
+  #pdf("../../data/2025-02-10/PaperFigures/SeuratClusterProportions_Tconventional_ByT1D_2clusts.pdf",width=5,height=5)
+  p <- ggplot(clusterTab, aes(x=studyGroup,y=prop)) + geom_boxplot(outlier.color=NA) + geom_quasirandom(size=1) + facet_wrap(~anno,nrow=1) + labs(x="",y="proportion",title="Memory Tconv Proportion in Clusters\nby T1D Disease Status")
+  print(p)
+  dev.off()
+  #tconvMemoryClusterUMAPOptimalResults <- optimizeRNAseqClustering (soMemoryTconvs, hyperParamGridPCA.df, min.dist.vector, n_neighbors.vector, maxNClusters = 7, minNClusters = 2)
+  next
+  ### DE between HC and T1D within each cluster
+  # Heat map of DEGs between Treg and Tconv with the new Seurat clustering
+  mem_coords <- soMemoryTconvs@meta.data
+  mem_coords$cluster <- mem_coords$seurat_clusters
+  df <- mem_coords; 
+  df$donorCluster <- paste0( df$donorID,"_",df$cluster)
+  df$group <- df$donorCluster
+  groups <- unique(df$group)
+  
+  # libsByGroup <- lapply( groups, function(g) df$libid[ df$ donorType==g & ! df$libid %in% c(toFilter,iNKTMaitLibids)])
+  libsByGroup <- lapply( groups, function(g) df$libid[ df$group==g ])
+  names(libsByGroup) <- groups
+  
+  libs <- unique( do.call(c,libsByGroup))
+  
+  bulk <- data.frame(sapply( libsByGroup, function(libs) rowSums(counts_pc[,c(libs,libs)])/2 ))
+  nCells <- sapply(libsByGroup,length)
+  
+  #g <- rownames(counts_pc)[ rowMeans(counts_pc[,libs]>0) >= 0.3 ]
+  g <- rownames(bulk)[ rowMeans(bulk>0) >= 0.1 ]
+  
+  bulk <- bulk[g,]
+  # Combine project P214-24 into project P214-17
+  
+  normalize_counts <- function(counts_in, method){
+    #normalize using tmm or deconvolution
+    #tmm is good for bulk RNAseq
+    #deconvolution is best for large datasets of single cell RNAseq
+    #deconvolution is NOT recommended for smaller datasets (less than a few hundred cells)
+    
+    if(method == "decon"){
+    #Normalize using the deconvolution algorithm
+    decon_norm_factors <- computeSumFactors(as.matrix(counts_in))
+    counts_norm <- as.data.frame(t(t(counts_in)/decon_norm_factors))
+    }
+    
+    if(method == "tmm"){
+    #Normalize using the TMM algorithm 
+    dge <- DGEList(counts_in)
+    dge <- calcNormFactors(dge)
+    counts_norm <- edgeR::cpm(dge, normalized.lib.sizes=TRUE)
+    }
+    return(counts_norm)
+  }
+  
+  bulk_pc_norm <- normalize_counts(bulk[g,],"tmm")
+  designBulk <- data.frame( t(sapply(colnames(bulk_pc_norm), function(s) strsplit(s,"_")[[1]])) )
+  colnames(designBulk) <- c("donorID","cluster")
+  designBulk$studyGroup <- designByDonor[ designBulk$donorID,"studyGroup"]
+  designBulk$nCells <- nCells
+  
+  design_mat <- model.matrix(~0+studyGroup:cluster+nCells,data=designBulk)
+  colnames(design_mat) <- gsub("studyGroup","",colnames(design_mat))
+  colnames(design_mat) <- gsub("cluster","",colnames(design_mat))
+  colnames(design_mat) <- gsub("\\:","_",colnames(design_mat))
+  
+  # Generate cont matrix that is T1D - HC for each cluster
+  t1dcols <- colnames(design_mat)[ grepl("T1D_", colnames(design_mat)) ]
+  cont.matrix <- matrix(0,ncol(design_mat),length(t1dcols)); rownames( cont.matrix) <- colnames(design_mat); colnames(cont.matrix) <- t1dcols
+  designMatCols <- colnames(design_mat)
+  cont.matrix <- sapply(t1dcols, function(t1dcol) ifelse(  designMatCols == t1dcol, 1, ifelse( designMatCols == gsub("T1D_","Control_", t1dcol) , -1, 0) ) )
+  rownames(cont.matrix) <- designMatCols
+  
+  vwtsMem <- voomWithQualityWeights(bulk_pc_norm[ ,rownames(design_mat)], design= design_mat, plot=T, span=0.1)
+  vfit <- lmFit(vwtsMem, design = design_mat)
+  vfit_eb <- eBayes(vfit)
+  vfit_c <- contrasts.fit(vfit, cont.matrix)
+  vfit_c_eb <- eBayes(vfit_c)
+  
+  t1dDEByClusterMem <- lapply( 1:ncol(cont.matrix), function(i) topTable (vfit_c_eb, coef = i, number=Inf, sort.by="P") ); names(t1dDEByClusterMem) <- colnames( cont.matrix )
+  for( i in 1:length(t1dDEByClusterMem) ){ t1dDEByClusterMem[[i]]$HGNC.symbol <- ens2hgnc[ rownames(t1dDEByClusterMem[[i]])]}
+  sapply(t1dDEByClusterMem, function(l) table( l$adj.P.Val <= 0.05))
+  #saveRDS(t1dDEByClusterMem,"t1dDEByCluster_limma_Cell0.3_Naive2.RDS")
+  
+  ## Here do significant ones
+  sigDf <- data.frame()
+  for( ctype in names(t1dDEByClusterMem) ){
+    print(ctype)
+    clust <- gsub("T1D_","",ctype)
+    de <- t1dDEByClusterMem[[ctype]]
+    df <- designBulk[ designBulk$cluster == clust ,]
+    
+    sigs <- rownames(de)[de$adj.P.Val <= 0.05]
+    df <- df[ order(df$studyGroup,df$donorID),]
+    cols <- list(studyGroup=groupCols)
+    cols[["donorID"]] <- make_colors( unique(df$donorID))
+    tp <- t(scale(t(log2(1+bulk_pc_norm[sigs,rownames(df)]))))
+    tp <- tp[ !apply(tp,1,function(r) any(is.na(r))),]
+    tp <- tp[apply(tp,1, function(r) length(unique(r)) >= 5),]
+    filteredSigs <- rownames(tp)
+    rownames(tp) <- ens2hgnc[ rownames(tp)]
+    ha <- HeatmapAnnotation( df=df[colnames(tp),c("studyGroup","donorID")], col=cols[c("studyGroup","donorID")])
+    
+    height <- 550 + (nrow(tp)-31)*12
+    if(TRUE){
+      #pdf( paste0("../../data/2025-02-10/T1DDE/",ctype,"_T1DvHC_Mem_heatmap.pdf"), width=6.5,height=height/100)
+      png( paste0(plotDir,"T1DDE/",ctype,"_T1DvHC_",tconvSubset,"_heatmap.png"), width=550,height=height)
+    
+      p <- Heatmap(tp,show_column_names=FALSE,top_annotation=ha, name="scaled\nlog\nexpression", column_title=paste0(gsub("T1D_","",ctype)," T1D vs. Control, ", nrow(tp)," genes\n",tconvSubset), column_split = df$studyGroup)
+      print(p)
+      dev.off()
+    }
+    
+    ## Output the DE genes
+    sigDE <- de[ de$adj.P.Val <= 0.05,]
+    sigDE <- de[filteredSigs,]
+    #sigDE$MoreThan5Samples <- sigDE$HGNC.symbol %in% rownames(tp) 
+    sigDE$comparison <- ctype
+    sigDf <- rbind(sigDf,sigDE)
+    
+    #write.table( filteredSigs, paste0("../../data/2026-01-30/T1DDE2/T1DDE_",clust,"_Naive_FDR0.05.txt"),quote=FALSE,sep="\t",col.names=FALSE,row.names=FALSE)
+    
+  }
+  #write.table( sigDf, paste0("../../data/2026-01-30/T1DDE2/T1DDE_byCluster_FDR0.05.txt"),quote=FALSE,sep="\t",col.names=NA)
 }
 
-redim <- reducedDim(traj_sce, "PCA")
-dimnames(redim) <- list(colnames(traj_sce), paste0("PC", c(1:ncol(redim))))
-reducedDim(traj_sce, "PCA") <- redim 
+### Now to hallmark
+library(msigdbr)
+h = data.frame( msigdbr(species = "Homo sapiens", category = "H") )
+hallmark <- unique(h$gs_name)
+hallmark_list <- lapply(hallmark, function(hname) h$gene_symbol[ h$gs_name == hname])
+names(hallmark_list) <- hallmark
 
-logcounts(traj_sce) <- log(counts(traj_sce) + 1)
-traj_sce <- scater::runPCA(traj_sce)
-traj_sce <- runUMAP(traj_sce)
-plotUMAP(traj_sce)
+coeffs <- colnames(cont.matrix)
+clusterT1DRoast_h <- lapply( coeffs, function(coeff) roast(
+      y=vwtsMem,
+      index=ids2indices(hallmark_list, identifiers=gene_key$HGNC.symbol[match(rownames(vwts), gene_key$Ensembl.Gene.ID)]),
+      design=design_mat,
+      contrast= cont.matrix[,coeff],
+      nrot = 10000) )
+names(clusterT1DRoast_h) <- coeffs
+sapply(clusterT1DRoast_h, function(l) table(l$FDR <= 0.05))
+lapply(clusterT1DRoast_h, function(l) head(l))
 
-traj_milo <- Milo(traj_sce)
-reducedDim(traj_milo, "UMAP") <- reducedDim(traj_sce, "UMAP")
-traj_milo <- buildGraph(traj_milo, k = 10, d = 30)
+keggnames <- unique(keggs$gs_name)
+kegg_list <- lapply(keggnames, function(hname) keggs$human_gene_symbol[ keggs$gs_name == hname])
+names(kegg_list) <- keggnames
+clusterT1DRoast_kegg <- lapply( coeffs, function(coeff) roast(
+      y=vwtsMem,
+      index=ids2indices(kegg_list, identifiers=gene_key$HGNC.symbol[match(rownames(vwts), gene_key$Ensembl.Gene.ID)]),
+      design=design_mat,
+      contrast= cont.matrix[,coeff],
+      nrot = 10000) )
+names(clusterT1DRoast_kegg) <- coeffs
+lapply(clusterT1DRoast_kegg, function(l) head(l))
 
-traj_milo <- makeNhoods(traj_milo, prop = 0.1, k = 10, d=30, refined = TRUE)
-plotNhoodSizeHist(traj_milo)
-traj_milo <- countCells(traj_milo, meta.data = data.frame(colData(traj_milo)), samples="Sample")
-head(nhoodCounts(traj_milo))
+```
 
-# Get soTconvs
-traj_design <- data.frame(colData(traj_milo))[,c("Sample", "Condition")]
-traj_design <- distinct(traj_design)
-rownames(traj_design) <- traj_design$Sample
-## Reorder rownames to match columns of nhoodCounts(milo)
-traj_design <- traj_design[colnames(nhoodCounts(traj_milo)), , drop=FALSE]
+```{r 01/20/26 Pseudobulk Clusters, memoryClusters}
 
-traj_milo <- calcNhoodDistance(traj_milo, d=30)
-rownames(traj_design) <- traj_design$Sample
-da_results <- testNhoods(traj_milo, design = ~ Condition, design.df = traj_design)
-## Using TMM normalisation
-da_results %>%
-  arrange(PValue) %>%
-  head() 
+mem_coords$group <- paste0(mem_coords$donorID, "_", mem_coords$cluster)
+groups <- unique(mem_coords$group)
+libsByGroup <- lapply(groups, function(group) mem_coords$libid[ mem_coords$group == group])
+names(libsByGroup) <- groups
+libsByGroup <- libsByGroup[ sapply(libsByGroup,length) > 0]
 
-z <- da_results[ order(da_results$PValue),]
-print(head(z))
+bulk_pc_norm <- sapply( libsByGroup, function(libs) rowSums(counts_pc[,c(libs,libs)] )/2 )
+bulk_pc_norm <- bulk_pc_norm[ rowMeans(bulk_pc_norm > 0) >= 0.1, ]
 
-traj_milo <- buildNhoodGraph(traj_milo)
+bulk_pc_norm <- normalize_counts(bulk_pc_norm,"tmm")
+design_bulk <- data.frame( t( sapply( colnames(bulk_pc_norm), function(s) strsplit(s,"_")[[1]]) ) )
+colnames(design_bulk) <- c("donorID","cluster")
 
-plotUMAP(traj_milo) + plotNhoodGraphDA(traj_milo, da_results, alpha=0.25) +
-  plot_layout(guides="collect")
+design_mat <- model.matrix(~0+cluster+donorID,data=design_bulk)
+colnames(design_mat) <- gsub("cluster","c",colnames(design_mat))
+colnames(design_mat) <- gsub("donorID","",colnames(design_mat))
+
+clusts <- colnames(design_mat)[ grepl("c",colnames(design_mat))]
+cont.matrix <- matrix(0,ncol(design_mat),length(clusts))
+rownames(cont.matrix) <- colnames(design_mat)
+for( i in 1:length(clusts) ){
+  clust <- clusts[i]
+  cont.matrix[clusts,i] <- -1/(length(clusts)-1)
+  cont.matrix[clusts[i],i] <- 1
+}
+colnames(cont.matrix) <- clusts
+
+vwts <- voomWithQualityWeights(bulk_pc_norm[ ,rownames(design_mat)], design= design_mat, plot=T, span=0.1)
+vfit <- lmFit(vwts, design = design_mat)
+vfit_eb <- eBayes(vfit)
+vfit_c <- contrasts.fit(vfit, cont.matrix)
+vfit_c_eb <- eBayes(vfit_c)
+
+clustcompsMem <- lapply( 1:ncol(cont.matrix), function(i) topTable (vfit_c_eb, coef = i, number=Inf, sort.by="P")  )
+names(clustcompsMem) <- colnames(cont.matrix)
+for( i in 1:length(clustcomps) ){ 
+  clustcompsMem[[i]]$HGNC.symbol <- ens2hgnc[ rownames(clustcompsMem[[i]])]
+  clustcompsMem[[i]]$cluster <- names(clustcompsMem)[i]
+  clustcompsMem[[i]]$Ensemble.ID <- rownames(clustcompsMem[[i]])
+
+}
+lapply(clustcompsMem, function(l) table( l$adj.P.Val <= 0.05))
+
+### Heatmaps
+topMarkers <- do.call( rbind, clustcomps)
+topMarkers <- topMarkers[ topMarkers$logFC > 0 & topMarkers$adj.P.Val <= 0.01,]
+topMarkers  <- topMarkers[order(topMarkers$P.Value),]
+topMarkers <- topMarkers[!duplicated(topMarkers$HGNC.symbol),]
+topN <- do.call( rbind, lapply( unique(topMarkers$cluster), function(clust) topMarkers[topMarkers$cluster==clust,][1:15,]))
+
+ens <- topN$Ensemble.ID
+libs <- rownames(design_bulk); libs <- libs[order(design_bulk$cluster)]
+tp <- t(scale(t(log2(1+bulk_pc_norm[ens,libs]))))
+rownames(tp) <- ens2hgnc[ rownames(tp)]
+clustcols <- hue_pal()(length(unique(design_bulk$cluster)))
+names(clustcols) <- 1:length(unique(design_bulk$cluster))-1
+ha <- HeatmapAnnotation(df=data.frame(cluster=design_bulk[libs,"cluster"]), col=list(cluster=clustcols))
+#pdf("../../data/2026-01-30/cluster_heatmap_top15.pdf", width=6,height =10)
+png("../../data/2026-01-30/cluster_heatmap_top15.png", width=500,height =800)
+
+Heatmap(tp,show_column_names=FALSE,column_split=design_bulk[libs,"cluster"],name="scaled\nlog2\nexpression", top_annotation=ha,  cluster_rows=TRUE,cluster_columns=FALSE )
+dev.off()
+
+
+
+```
+
+```{r 01/30/26 Scenic Analysis on Memory Tconvs}
+library(SCENIC)
+
+if(FALSE){
+  # Get motif databases
+  dbFiles <- c("https://resources.aertslab.org/cistarget/databases/homo_sapiens/hg19/refseq_r45/mc9nr/gene_based/hg19-500bp-upstream-7species.mc9nr.feather",
+  "https://resources.aertslab.org/cistarget/databases/homo_sapiens/hg19/refseq_r45/mc9nr/gene_based/hg19-tss-centered-10kb-7species.mc9nr.feather")
+  # mc9nr: Motif collection version 9: 24k motifs
+  dir.create("cisTarget_databases"); setwd("cisTarget_databases") # if needed
+  for(featherURL in dbFiles)
+  {
+    download.file(featherURL, destfile=basename(featherURL)) # saved in current dir
+  }
+}
+
+
+### Initialize settings
+motifAnnotations_hgnc <- readRDS("../../../data/cisTargetDatabases/motiffAnnotations_hgnc.RDS")
+scenicOptions <- initializeScenic(org="hgnc", dbDir="../../../data/cisTargetDatabases", nCores=4)
+# scenicOptions@inputDatasetInfo$cellInfo <- "int/cellInfo.Rds"
+saveRDS(scenicOptions, file="scenicOptions.Rds") 
+
+### Co-expression network
+ens <- rownames(counts_pc_norm)[ rev(order(rowSums(counts_pc_norm)))]
+exprMat <- as.matrix(counts_pc_norm)
+hgnc <-  ens2hgnc[ rownames(exprMat)]
+exprMat <- exprMat[!duplicated(hgnc),]
+rownames(exprMat) <- ens2hgnc[ rownames(exprMat)]
+genesKept <- geneFiltering( exprMat, scenicOptions)
+exprMat_filtered <- exprMat[genesKept, ]
+runCorrelation(exprMat_filtered, scenicOptions)
+exprMat_filtered_log <- log2(exprMat_filtered+1) 
+runGenie3(exprMat_filtered_log, scenicOptions)
+
+### Build and score the GRN
+exprMat_log <- log2(exprMat+1)
+scenicOptions@settings$dbs <- scenicOptions@settings$dbs["10kb"] # Toy run settings
+scenicOptions <- runSCENIC_1_coexNetwork2modules(scenicOptions)
+scenicOptions <- runSCENIC_2_createRegulons(scenicOptions, coexMethod=c("top5perTarget")) # Toy run settings
+scenicOptions <- runSCENIC_3_scoreCells(scenicOptions, exprMat_log,skipTsne=TRUE)
+
+# Optional: Binarize activity
+# aucellApp <- plotTsne_AUCellApp(scenicOptions, exprMat_log)
+# savedSelections <- shiny::runApp(aucellApp)
+# newThresholds <- savedSelections$thresholds
+# scenicOptions@fileNames$int["aucell_thresholds",1] <- "int/newThresholds.Rds"
+# saveRDS(newThresholds, file=getIntName(scenicOptions, "aucell_thresholds"))
+scenicOptions <- runSCENIC_4_aucell_binarize(scenicOptions)
+tsneAUC(scenicOptions, aucType="AUC") # choose settings
+
+regulon <- readRDS("int/3.1_regulons_forAUCell.Rds")
+
+binaryRegulon <- data.frame( t(readRDS("int/4.1_binaryRegulonActivity.Rds") ) )
+
+pvals <- apply( binaryRegulon, 2, function(row) oneway.test(row ~ cds_coords[rownames(binaryRegulon),"cluster"])$p.value)
+pvals <- pvals[!is.na(pvals)]; pvals <- pvals[order(pvals)]
+pvals <- data.frame(P.Value=pvals, adj.P.Val=p.adjust(pvals,method="BH"))
+
+#Heatmap(binaryRegulon,show_column_names=FALSE,column_split = cds_coords[colnames(binaryRegulon),"cluster"])
+cds_coords[,colnames(binaryRegulon)] <- binaryRegulon[ rownames(cds_coords),]
+for( tf in rownames(pvals)[pvals$adj.P.Val <= 0.05] ){
+  print(tf)
+  cds_coords$tf <- cds_coords[,tf]
+  tfname <- strsplit( strsplit(tf,"_")[[1]][1], "\\.")[[1]][1]
+  cds_coords <- cds_coords[ order(cds_coords[,tf]),]
+  p <- ggplot(cds_coords[!is.na(cds_coords$tf),], aes(x=x,y=y,color=ifelse(tf == 1, "active","inactive") )) + geom_point() + scale_color_manual(values=c("inactive"="grey","active"="red")) + labs(title=paste0(tfname, " regulon"),color="", x= "UMAP 1",y="UMAP 2")
+  png( paste0("data/2024-05-29/Scenic/",tf,"_UMAP.png"),width=500,height=400 )
+  print(p)
+  dev.off()
+}
+
+
+
+
+# To save the current status, or any changes in settings, save the object again:
+#saveRDS(scenicOptions, file="int/scenicOptions.Rds") 
+
+### Exploring output 
+# Check files in folder 'output'
+# Browse the output .loom file @ http://scope.aertslab.org
+
+# output/Step2_MotifEnrichment_preview.html in detail/subset:
+motifEnrichment_selfMotifs_wGenes <- loadInt(scenicOptions, "motifEnrichment_selfMotifs_wGenes")
+tableSubset <- motifEnrichment_selfMotifs_wGenes[highlightedTFs=="Sox8"]
+viewMotifs(tableSubset) 
+
+# output/Step2_regulonTargetsInfo.tsv in detail: 
+regulonTargetsInfo <- loadInt(scenicOptions, "regulonTargetsInfo")
+tableSubset <- regulonTargetsInfo[TF=="Stat6" & highConfAnnot==TRUE]
+viewMotifs(tableSubset) 
+
+# Cell-type specific regulators (RSS): 
+regulonAUC <- loadInt(scenicOptions, "aucell_regulonAUC")
+rss <- calcRSS(AUC=getAUC(regulonAUC), cellAnnotation=cellInfo[colnames(regulonAUC), "CellType"], )
+rssPlot <- plotRSS(rss)
+plotly::ggplotly(rssPlot$plot)
+
+
+```
+
+```{r 02/18/26 Proportion expanded by cluster }
+
+tcrs$donorID <- design[ tcrs$libid, "donorID"]
+tcrs$DonorNuc <- paste( tcrs$donorID, tcrs$full_nt_sequence)
+expandedDonorNucs <- tcrs$DonorNuc[ duplicated( tcrs$DonorNuc)]
+sharedJunctions <- unique( tcrs$junction[ duplicated( tcrs$junction)] )
+tcrs$expanded <- tcrs$DonorNuc %in% (expandedDonorNucs)
+expandedlibs <- unique(tcrs$libid[ tcrs$expanded] )
+
+
+soTconvs$expanded <- soTconvs$libid %in% expandedlibs  
+expandedPropByCluster <- aggregate( soTconvs$expanded, by=list(soTconvs$seurat_clusters, soTconvs$studyGroup), FUN = mean); colnames(expandedPropByCluster) <- c("cluster","studyGroup","proportion")
+ggplot( expandedPropByCluster, aes(x=studyGroup,y=proportion)) + geom_bar(stat="identity") + facet_wrap(~cluster)
+
+soTconvs$expanded <- soTconvs$libid %in% expandedlibs  
+soTregs$expanded <- soTregs$libid %in% expandedlibs  
+
+expandedPropByCluster <- aggregate( soTconvs$expanded, by=list(soTconvs$seurat_clusters, soTconvs$studyGroup, soTconvs$donorID), FUN = mean); colnames(expandedPropByCluster) <- c("cluster","studyGroup","donorID","proportion")
+#expandedPropByCluster <- aggregate( soTregs$expanded, by=list(soTregs$seurat_clusters, soTregs$studyGroup, soTregs$donorID), FUN = mean); colnames(expandedPropByCluster) <- c("cluster","studyGroup","donorID","proportion")
+
+ggplot( expandedPropByCluster, aes(x=gsub("Control","HC",studyGroup),y=proportion)) + geom_boxplot(outlier.color=NA) + geom_point(size=1) + facet_wrap(~cluster, scales="free", nrow=1) + labs(x="disease group",title="Proportion of Expanded Cells\nper Cluster and Donor")
+e <- min( c(expandedPropByCluster$proportion[ expandedPropByCluster$proportion != 0], 1-expandedPropByCluster$proportion[expandedPropByCluster$proportion != 1]) )/2
+expandedPropByCluster$p <- ifelse( expandedPropByCluster$proportion == 0, e, expandedPropByCluster$proportion )
+expandedPropByCluster$p[ expandedPropByCluster$p == 1 ] <- 1-e
+expandedPropByCluster$logit <- log( expandedPropByCluster$p/(1-expandedPropByCluster$p))
+clusts <- unique(expandedPropByCluster$cluster); clusts <- clusts[order(clusts)]
+pvals <- sapply( clusts, function(clust) oneway.test( logit ~ studyGroup, data=expandedPropByCluster[ expandedPropByCluster$cluster == clust,], var.equal=FALSE)$p.value)
+png("../../data/2026-01-30/ExpandedProps_T1DvHC_Treg.png",width=500,height=400)
+ggplot( expandedPropByCluster, aes(x=gsub("Control","HC",studyGroup),y=logit)) + geom_boxplot(outlier.color=NA) + geom_point(size=1) + facet_wrap(~paste0(cluster,"\np: ",signif(pvals[cluster],3)), scales="free", nrow=1) + labs(x="disease group",title="Proportion of Expanded Treg Cells\nper Cluster and Donor")
+dev.off()
 
 ```
 
 
+```{r 02/23/26 Re-cluster Tconvs, by memory and naive}
+
+so <- soTconvs
+findClustersRes = 0.12
+so <- FindClusters(so, resolution = findClustersRes, verbose = FALSE)
+DimPlot(so,
+  label = TRUE,
+  repel = TRUE,
+  group.by = "seurat_clusters")
+
+
+clustsMarkers <- FindAllMarkers(so)
+# Get top markers per cluster
+clustsMarkersTconvsPos <- clustsMarkers[clustsMarkers$avg_log2FC > 0,]
+ngenes <- 25
+clustsMarkersTconvsPos <- unique( do.call( c, lapply( unique(clustsMarkersTconvsPos$cluster ), function( clust ) clustsMarkersTconvsPos$gene[ clustsMarkersTconvsPos$cluster == clust][1:ngenes] ) ) )
+
+# Create a DotPlot of the expression of these genes in seuratQCMergedCleanedDS
+fontSize=10
+dotPlot.tmp <- DotPlot(so, features = clustsMarkersTconvsPos) +
+  theme(axis.text.x = element_text(angle = 60, hjust = 1, size = 8),
+    text = element_text(size = fontSize),
+    axis.text.y = element_text(size = fontSize),
+    axis.title.y = element_text(size = fontSize),
+    legend.text = element_text(size = fontSize),
+    legend.title = element_text(size = fontSize),
+    strip.text = element_text(size = fontSize),
+    plot.title = element_text(size = fontSize)) + labs(title=paste0(nclust," Tconv Clusters Top Markers"))
+print(dotPlot.tmp)
+
+# Print the DotPlot
+plotDir <- "../../data/2025-01-10/SeuratClusterPlots/"
+# pdf(file.path(plotDir, paste0("Tconvs",nclust, "_clusterDefiningGenesDotPlot_top10genes.pdf")), height = 4, width = 12)
+png(file.path(plotDir, paste0("Tconvs",nclust, "_clusterDefiningGenesDotPlot_top10genes.png")), height = 220, width = 900)
+
+print(dotPlot.tmp + scale_color_gradient2(low = "blue", mid = "white", high = "red"))
+dev.off()
+  
+```
+
+```{r 02/24/29 scenic aucell}
+
+aucs <- read.csv("../2026-02-10/aucs.csv",row.names=1)
+colnames(aucs) <- gsub("\\.\\.\\.","",colnames(aucs))
+tconv_coords <- soMemoryTconvs@meta.data
+e <- min(aucs[aucs!=0 ])/2
+tconv_coords[,colnames(aucs)] <- log10(e+aucs[ tconv_coords$libid,])
+tconv_coords$donorCluster <- paste0( tconv_coords$donorID,"_",tconv_coords$seurat_clusters)
+
+minval <- min(tconv_coords[,colnames(aucs)])
+tfNonzeroProp <- apply(tconv_coords[,colnames(aucs)],2,function(col) mean(col>minval)) 
+sigTFs <- names(tfNonzeroProp)[tfNonzeroProp>=2/6]
+
+aucsByDonorCluster <- aggregate( tconv_coords[,colnames(aucs)], by=list(donorID=tconv_coords$donorID, cluster=tconv_coords$seurat_clusters, studyGroup=tconv_coords$studyGroup), FUN=mean )
+aucsByDonorCluster$donorCluster <- paste0( aucsByDonorCluster$donorID,"_",aucsByDonorCluster$cluster)
+clusters <- unique(aucsByDonorCluster$cluster)
+# clusters <- c(0,1)
+scenicPvals <- lapply(clusters, function(clust) data.frame(P.Value=apply( aucsByDonorCluster[aucsByDonorCluster$cluster == clust,sigTFs], 2, function(col) oneway.test( col ~ aucsByDonorCluster$studyGroup[aucsByDonorCluster$cluster == clust],var.equal=FALSE)$p.value),cluster=clust, T1DMean = apply( aucsByDonorCluster[aucsByDonorCluster$cluster == clust & aucsByDonorCluster$studyGroup == "T1D",sigTFs], 2, function(col) mean(col)), HCMean = apply( aucsByDonorCluster[aucsByDonorCluster$cluster == clust & aucsByDonorCluster$studyGroup == "Control",sigTFs], 2, function(col) mean(col)) ) ) 
+for( i in 1:length(scenicPvals) ){ scenicPvals[[i]]$TF <- sigTFs};
+scenicPvals <- do.call(rbind,scenicPvals)
+scenicPvals$diff <- scenicPvals$T1DMean - scenicPvals$HCMean
+scenicPvals <- scenicPvals[scenicPvals$TF %in% sigTFs,]
+scenicPvals$adj.P.Val <- p.adjust( scenicPvals$P.Value,method="BH");
+scenicPvals <- scenicPvals[order(scenicPvals$P.Value),]
+print(head(scenicPvals))
+png("../../data/2026-01-30/T1DDE2/MemoryTconvScenicVolcano.png",width=700,height=600)
+ggplot(scenicPvals, aes(x=diff,y=-log10(P.Value))) + geom_point(size=0.1) + facet_wrap(~cluster) + geom_hline( yintercept = -log10(0.05), linetype="dashed",color="red") + geom_text_repel(data=scenicPvals[scenicPvals$P.Value <= 0.05,], aes(x=diff,y=-log10(P.Value), fontface="bold", label=TF) ) + labs(title="Memory Tconvs by Cluster, T1D v HC\nSCENIC Regulon Expression (log AUC)\n Best FDR: 0.81",x="T1D - HC",y="-log10 p-value")
+dev.off()
+ggplot(aucsByDonorCluster, aes(x=studyGroup,y=IKZF1)) + geom_boxplot(outlier.color=NA) + geom_point(size=1) + facet_wrap(~cluster) 
+
+
+
+aucsByDonor<- aggregate( tconv_coords[,colnames(aucs)], by=list(donorID=tconv_coords$donorID, studyGroup=tconv_coords$studyGroup), FUN=mean )
+scenicPvals <- data.frame(P.Value=apply( aucsByDonor[,sigTFs], 2, function(col) oneway.test( col ~ aucsByDonor$studyGroup,var.equal=FALSE)$p.value))
+scenicPvals$adj.P.Val <- p.adjust( scenicPvals$P.Value,method="BH");
+scenicPvals <- scenicPvals[order(scenicPvals$P.Value),]
+print(head(scenicPvals))
+ggplot(aucsByDonor, aes(x=studyGroup,y=NFIA)) + geom_boxplot(outlier.color=NA) + geom_quasirandom(size=1)
+```
+
+```{r 05/27/26 Analysis Edits}
+
+# Are all Tregs really Tregs since cluster 2 lacks FOXP3 expression (Fig 2 a)? Reviewer asks for the following
+# Put both Treg and Tconv genes (Fig 2b and 2d) on the same bubble plot and show expression in Treg and Tconv cell clusters. Q: can both cell types be shown easily wrt scale? Is it easier more compact to show in a heatmap? I can also refine the lists of genes if necessary.
+
+### Order the genes
+# Create a DotPlot of the expression of these genes in seuratQCMergedCleanedDS
+# Order the features so they're cluster
+ens  <- names(ens2hgnc)[ens2hgnc %in% tregMarkers2 & names(ens2hgnc) %in% rownames(counts_pc_norm)]
+  ## Cluster genes
+tp <- t(scale(t(log2(1+counts_pc_norm[ens, soTregs$libid]))))
+dist_matrix <- dist(tp)
+# Perform hierarchical clustering
+hc <- hclust(dist_matrix)
+# Get the order of columns based on hierarchical clustering
+column_order <- hc$order
+geneNames <- as.character( ens2hgnc[ ens[column_order]] )
+
+## Cluster genes
+ens  <- names(ens2hgnc)[ens2hgnc %in% tconvMarkers2 & names(ens2hgnc) %in% rownames(counts_pc_norm)]
+tp <- t(scale(t(log2(1+counts_pc_norm[ens, soTconvs$libid]))))
+dist_matrix <- dist(tp)
+# Perform hierarchical clustering
+hc <- hclust(dist_matrix)
+# Get the order of columns based on hierarchical clustering
+column_order <- hc$order
+geneNamesCombo <- unique(c(geneNames, as.character( ens2hgnc[ ens[column_order]] ) ) )
+
+
+dotPlot.tmp <- DotPlot(soFiltered, features = geneNamesCombo, group.by="combinedClusters") +
+      theme(axis.text.x = element_text(angle = 60, hjust = 1, size = 8),
+        text = element_text(size = fontSize),
+        axis.text.y = element_text(size = fontSize),
+        axis.title.y = element_text(size = fontSize),
+        legend.text = element_text(size = fontSize),
+        legend.title = element_text(size = fontSize),
+        strip.text = element_text(size = fontSize),
+        plot.title = element_text(size = fontSize)) + labs(title="Treg and Tconv Markers in Tconv and Treg Clusters", group.by="combinedClusters")
+    
+    # Print the DotPlot
+    plotDir <- "../../data/2026-05-27/"
+    # pdf(file.path(plotDir, paste0("Tconvs",nclust, "_clusterDefiningGenesDotPlot_top10genes.pdf")), height = 4, width = 12)
+    pdf(file.path(plotDir, paste0("TconvsTregs", "_TregTconvMarkersDotPlot.pdf")), height = 3, width = 10)
+
+    print(dotPlot.tmp + scale_color_gradient2(low = "blue", mid = "white", high = "red"))
+    dev.off()
+
+# B. Show expression of published Treg signatures by cluster (heat map and maybe z-score on bubble plot): Hollbacher genes and gene signature from Cheng (attached)
+cheng <- read_xlsx("../../data/2026-05-27/supplementary file 1 Cheng.xlsx"); cheng <- cheng$SBT_Identity_Treg[!is.na(cheng$SBT_Identity_Treg)]
+holl <- c("TNFRSF1B","HPGD","ZNF532","STAM","LRRC32","IL1R2","ZBTB38","TRIB1","ICA1","SGMS1","IKZF2","TNFRSF9","CTLA4","FOXP3","VAV3","CSF2RB","METTL7A","IL1R1","ZC2HC1A","VOPP1")
+chengHoll <- unique(c(cheng,holl))
+
+
+## Cluster genes
+ens  <- names(ens2hgnc)[ens2hgnc %in% chengHoll & names(ens2hgnc) %in% rownames(counts_pc_norm)]
+
+tp <- t(scale(t(log2(1+counts_pc_norm[ens, soTconvs$libid]))))
+dist_matrix <- dist(tp)
+# Perform hierarchical clustering
+hc <- hclust(dist_matrix)
+# Get the order of columns based on hierarchical clustering
+column_order <- hc$order
+geneNames <- as.character( ens2hgnc[ ens[column_order]] )
+
+soFiltered@meta.data$cluster <- gsub("Treg","Treg ",gsub("Tconv","Tconv ",soFiltered@meta.data$combinedClusters))
+dotPlot.tmp <- DotPlot(soFiltered, features = geneNames, group.by="cluster") +
+      theme(axis.text.x = element_text(angle = 60, hjust = 1, size = 8),
+        text = element_text(size = fontSize),
+        axis.text.y = element_text(size = fontSize),
+        axis.title.y = element_text(size = fontSize),
+        legend.text = element_text(size = fontSize),
+        legend.title = element_text(size = fontSize),
+        strip.text = element_text(size = fontSize),
+        plot.title = element_text(size = fontSize)) + labs(title="Treg Markers in Tconv and Treg Clusters", group.by="combinedClusters")
+    
+    # Print the DotPlot
+    plotDir <- "../../data/2026-05-27/"
+    # pdf(file.path(plotDir, paste0("Tconvs",nclust, "_clusterDefiningGenesDotPlot_top10genes.pdf")), height = 4, width = 12)
+    pdf(file.path(plotDir, paste0("TconvsTregs", "_ChengHollbacherDotPlot.pdf")), height = 3, width = 8)
+
+    print(dotPlot.tmp + scale_color_gradient2(low = "blue", mid = "white", high = "red"))
+    dev.off()
+
+# 06/04/26 make dotplot with updated list of genes, maintaining their oder
+genesDf <- read_xlsx( "../../data/2026-06-04/Grouped Bubble plot genes.xlsx")
+genesTregTconv <- as.character(genesDf$...2[2:nrow(genesDf) ]); 
+genesTregTconv <- sapply(genesTregTconv, function(s) strsplit(s," ")[[1]][1])
+genesTregTconv <- gsub("IL7RA","IL7R",genesTregTconv)
+genesTregTconv <- gsub("OX40","TNFRSF4",genesTregTconv)
+hladr <- ens2hgnc[ names(ens2hgnc) %in% rownames(counts_pc_norm) & grepl("HLA-DR",ens2hgnc)]
+i <- which(genesTregTconv == "HLADR")
+genesTregTconv <- c( genesTregTconv[1:(i-1)], hladr, genesTregTconv[(i+1):length(genesTregTconv)])
+hladrExp <- colSums( counts_pc_norm[ names(hladr),] )
+soFiltered$HLADR <- hladrExp[ colnames(soFiltered)]
+hgnc2ens <- names(ens2hgnc); names(hgnc2ens) <- ens2hgnc
+ens <- hgnc2ens[genesTregTconv]
+geneNames <- genesTregTconv
+# soFiltered@meta.data$cluster <- gsub("Treg","Treg ",gsub("Tconv","Tconv ",soFiltered@meta.data$combinedClusters))
+dotPlot.tmp <-  DotPlot(soFiltered, features = as.character(geneNames), group.by="cluster") +
+      theme(axis.text.x = element_text(angle = 60, hjust = 1, size = 8),
+        text = element_text(size = fontSize),
+        axis.text.y = element_text(size = fontSize),
+        axis.title.y = element_text(size = fontSize),
+        legend.text = element_text(size = fontSize),
+        legend.title = element_text(size = fontSize),
+        strip.text = element_text(size = fontSize),
+        plot.title = element_text(size = fontSize)) + labs(title="Treg Markers in Tconv and Treg Clusters", group.by="combinedClusters")
+  # Print the DotPlot
+plotDir <- "../../data/2026-05-27/"
+# pdf(file.path(plotDir, paste0("Tconvs",nclust, "_clusterDefiningGenesDotPlot_top10genes.pdf")), height = 4, width = 12)
+pdf(file.path(plotDir, paste0("TconvsTregs", "_CuratedDotPlot.pdf")), height = 3, width = 10)
+print(dotPlot.tmp + scale_color_gradient2(low = "blue", mid = "white", high = "red"))
+dev.off()
+    
+# C. Can you please overlay expression of FOXP3, IKZF2, IL2RA, CTLA4, IL7RA, ICOS, TIGIT on the Treg clusters in Fig 2a? I’m thinking to add this to the supplement to avoid row normalization
+features <- c("FOXP3","IKZF2","IL2RA","CTLA4","IL7R","ICOS","TIGIT")
+treg_coords <- data.frame( Embeddings(soTregs, reduction = "umap") )
+treg_coords <- cbind(treg_coords,soTregs@meta.data)
+treg_coords[,c("x","y")] <- treg_coords[,c("umap_1","umap_2")]
+for( g in features ){
+  ens <- names(ens2hgnc)[ens2hgnc == g]; ens <- ens[!is.na(ens) & grepl("ENS",ens)]
+#for( ens in pseudotimeEns ){
+#for( ens in tEns ){
+#for( ens in topN$Ensemble.ID ){
+  #g <- topN$HGNC.symbol[ topN$Ensemble.ID == ens][1]
+  g <- ens2hgnc[ens]
+  print(g)
+  treg_coords$g <- as.numeric( log2(1+counts_pc_norm[ens,treg_coords$libid]) )
+  treg_coords <- treg_coords[order(treg_coords$g),]
+  p <- ggplot( treg_coords, aes(x=x,y=y,color=g)) + geom_point(size=1) + scale_color_viridis( option="B") + labs(x="UMAP 1",y="UMAP 2",color="log2\nnormalized\nexpression",title=g)
+  pdf( paste0("../../data/2026-05-27/TregClusterMarkers/", g, ".pdf"),width=6.2,height=4.5 )
+  print(p)
+  dev.off()  
+}
+# D. Should we do a and b above in P589 as well? If so, could you please do this Thomas?
+# 2. Is increased expansion of Treg vs Tconv (Fig 3d) unique to islet or is it also seen in microbial and polyclonal Treg vs Tconv (P589)?
+# Calculate the median proportion cells/donor with shared nucleotide sequence (fig 3d) on P589 CEFX and polyclonal TCRs. Need to confirm with Thomas what set of TCRs to use for this. I’ve attached the table of TCRs from the manuscript supp data.
+# Reviewer wants histograms of the clonotype expansion distribution and counts for Tconv and Treg in Fig 3.
+subpairs <- pairs[pairs$libid %in% soFiltered$libid,]
+subpairs$sort <- ifelse( subpairs$libid %in% soTregs$libid, "Treg","Tconv")
+subpairs$pairnt <- paste( subpairs$CDR3ant, subpairs$CDR3bnt)
+subpairs$pairntSort <- paste(subpairs$pairnt,subpairs$sort)
+subpairs$cluster <- so@meta.data[ subpairs$sample, "seurat_clusters"]
+expandedPairs <- subpairs[ subpairs$pairnt %in% subpairs$pairnt[duplicated(subpairs$pairnt)],]
+pairntTab <- table(subpairs$pairntSort)
+subpairs$count <- pairntTab[ subpairs$pairntSort]
+tp <- subpairs[!duplicated(subpairs$pairntSort),]
+tp$studyGroup <- design[ tp$libid, "studyGroup"]
+
+pdf("../../data/2026-06-04/ExpandedClonotypeCount.pdf",width=7,height=5)
+png("../../data/2026-06-04/ExpandedClonotypeCount.png",width=600,height=400)
+
+ggplot( tp[tp$count > 1,], aes(x=count,fill=studyGroup) ) + geom_histogram(stat="count",binwidth=1) + facet_wrap(~sort) + labs(x="expanded clonotype cell count") + scale_fill_manual( values=groupCols) + labs(fill="") + theme(legend.position="bottom")
+dev.off()
+
+## 06/08/26 Could you please look at expression of the individual gene sets in P390 Tconv or Treg based on the cell type they were defined in, comparing T1D and HC?
+deList <- read_excel_allsheets("../../data/2026-06-04/T1D vs HC gene sets Treg_Tconv.xlsx")
+geneLists <- list()
+for( comp in names(deList)[grepl("TIGS",names(deList))] ){
+  celltype <- ifelse( grepl("Treg",comp), "Treg","Tconv")
+  de <- t1dDE[[celltype]]
+  genes <- deList[[comp]]
+  nam <- paste0(comp,"\n",celltype)
+  sigs <- genes[genes$FDR <= 0.05 & genes$gene_id %in% rownames(de),]
+  de$anno <- "n.s."; de[sigs$gene_id,"anno"] <- sigs$Status
+  annos <- unique(de$anno[de$anno != "n.s."]);
+  geneLists[[nam]] <- do.call(rbind,lapply(annos, function(a) data.frame( "ens"=rownames(de)[de$anno == a],"anno"=a )))
+  de <- de[order(!de$anno == "n.s."),]
+  de2 <- de[sigs$gene_id,]
+  de2$FDR <- p.adjust(de2$P.Value,method="BH")
+  de2 <- de2[order(de2$P.Value),]
+  p <- ggplot(de, aes(x=logFC,y=-log10(adj.P.Val), color=anno)) + geom_point(size=1) + geom_hline(yintercept = -log10(0.05),linetype="dashed",color="grey") + geom_vline(xintercept = 0,linetype="dashed",color="grey") + geom_hline(yintercept = -log10(0.05),linetype="dashed",color="grey") + labs(title=paste0(celltype,"\n",comp,"\n","P390 T1D vs. HC"), color="external\nT1D\nDE") + geom_text_repel(data=de2[1:10,], aes(logFC, -log10(adj.P.Val), fontface="bold", label=HGNC.symbol, color=anno), size=5) + scale_color_manual( values=c("Down"="blue","Up"="red")) 
+  png( paste0("../../data/2026-06-04/P390_T1DvHC_",comp,".png"),width= 500,height=450)
+  print(p)
+  dev.off()
+}
+
+for(celltype in c("Treg","Tconv")){
+  comp <- "Niederlova Total CD4"
+  print( paste(comp,celltype))
+  de <- t1dDE[[celltype]]
+  genes <- deList[[comp]]
+  nam <- paste0(comp,"\n",celltype)
+  de$anno <- "n.s."; de[de$HGNC.symbol %in% genes[,1],"anno"] <- "Up"
+  de[de$HGNC.symbol %in% genes[,2],"anno"] <- "Down"
+  de <- de[order(!de$anno == "n.s."),]
+  de2 <- de[de$anno != "n.s.",]
+  de2$FDR <- p.adjust(de2$P.Value,method="BH")
+  de2 <- de2[order(de2$P.Value),]
+  annos <- unique(de$anno[de$anno != "n.s."]);
+  geneLists[[nam]] <- do.call(rbind,lapply(annos, function(a) data.frame( "ens"=rownames(de)[de$anno == a],"anno"=a )))
+  p <- ggplot(de, aes(x=logFC,y=-log10(adj.P.Val), color=anno)) + geom_point(size=1) + geom_hline(yintercept = -log10(0.05),linetype="dashed",color="grey") + geom_vline(xintercept = 0,linetype="dashed",color="grey") + geom_hline(yintercept = -log10(0.05),linetype="dashed",color="grey") + labs(title=paste0(celltype,"\n",comp,"\n","P390 T1D vs. HC"), color="external\nT1D\nDE") + geom_text_repel(data=de2[1:10,], aes(logFC, -log10(adj.P.Val), fontface="bold", label=HGNC.symbol, color=anno), size=5) + scale_color_manual( values=c("Down"="blue","Up"="red")) 
+  png( paste0("../../data/2026-06-04/P390_T1DvHC_",comp,"_",celltype,".png"),width= 500,height=450)
+  print(p)
+  dev.off()
+}
+
+## niederlova treg
+celltype <- "Treg"
+comp <- "ParseBio Treg em "
+nam <- paste0(comp,"\n",celltype)
+de <- t1dDE[[celltype]]
+genes <- deList[[comp]]
+genes <- genes[genes$gene %in% de$HGNC.symbol,]
+de$anno <- "n.s."; de$anno[ de$HGNC.symbol %in% genes$gene[ genes$direction == "T1D_up"] ] <- "Up"
+de$anno[ de$HGNC.symbol %in% genes$gene[ genes$direction == "T1D_down"] ] <- "Down"
+de <- de[order(!de$anno == "n.s."),]
+de2 <- de[de$HGNC.symbol %in% genes[,1],]
+de2$FDR <- p.adjust(de2$P.Value,method="BH")
+de2 <- de2[order(de2$P.Value),]
+annos <- unique(de$anno[de$anno != "n.s."]);
+geneLists[[nam]] <- do.call(rbind,lapply(annos, function(a) data.frame( "ens"=rownames(de)[de$anno == a],"anno"=a )))
+p <- ggplot(de, aes(x=logFC,y=-log10(adj.P.Val), color=anno)) + geom_point(size=1) + geom_hline(yintercept = -log10(0.05),linetype="dashed",color="grey") + geom_vline(xintercept = 0,linetype="dashed",color="grey") + geom_hline(yintercept = -log10(0.05),linetype="dashed",color="grey") + labs(title=paste0(celltype,"\n",comp,"\n","P390 T1D vs. HC"), color="external\nT1D\nDE") + geom_text_repel(data=de2[1:10,], aes(logFC, -log10(adj.P.Val), fontface="bold", label=HGNC.symbol, color=anno), size=5) + scale_color_manual( values=c("Down"="blue","Up"="red")) 
+png( paste0("../../data/2026-06-04/P390_T1DvHC_",comp,".png"),width= 500,height=450)
+print(p)
+dev.off()
+
+
+celltype <- "Treg"
+comp <- "Niederlova Treg"
+nam <- paste0(comp,"\n",celltype)
+de <- t1dDE[[celltype]]
+genes <- deList[[comp]]
+genes <- as.character( genes[,1] )
+de$anno <- "n.s."; de$anno[ de$HGNC.symbol %in% genes ] <- "Up"
+de <- de[order(!de$anno == "n.s."),]
+de2 <- de[de$HGNC.symbol %in% genes,]
+de2$FDR <- p.adjust(de2$P.Value,method="BH")
+de2 <- de2[order(de2$P.Value),]
+annos <- unique(de$anno[de$anno != "n.s."]);
+geneLists[[nam]] <- do.call(rbind,lapply(annos, function(a) data.frame( "ens"=rownames(de)[de$anno == a],"anno"=a )))
+p <- ggplot(de, aes(x=logFC,y=-log10(adj.P.Val), color=anno)) + geom_point(size=1) + geom_hline(yintercept = -log10(0.05),linetype="dashed",color="grey") + geom_vline(xintercept = 0,linetype="dashed",color="grey") + geom_hline(yintercept = -log10(0.05),linetype="dashed",color="grey") + labs(title=paste0(celltype,"\n",comp,"\n","P390 T1D vs. HC"), color="external\nT1D\nDE") + geom_text_repel(data=de2[1:10,], aes(logFC, -log10(adj.P.Val), fontface="bold", label=HGNC.symbol, color=anno), size=5) + scale_color_manual( values=c("Down"="blue","Up"="red")) 
+png( paste0("../../data/2026-06-04/P390_T1DvHC_",comp,".png"),width= 500,height=450)
+print(p)
+dev.off()
+
+
+## Here do significant ones
+for( comp in names(geneLists) ){
+  print(comp)
+  genes <- geneLists[[comp]]
+  ctype <- strsplit(comp,"\n")[[1]][2]
+  studyName <- strsplit(comp,"\n")[[1]][1]
+  de <- t1dDE[[ctype]]
+  df <- designBulk[ grepl(ctype,designBulk$type) ,]
+  sigs <- genes[,1]
+  df <- df[ order(df$studyGroup,df$donorID),]
+  cols <- list(studyGroup=groupCols)
+  cols[["donorID"]] <- make_colors( unique(df$donorID))
+  tp <- t(scale(t(log2(1+bulk_pc_norm[sigs,rownames(df)]))))
+  tp <- tp[ !apply(tp,1,function(r) any(is.na(r))),]
+  genes <- genes[ genes[,1] %in% rownames(tp),]
+  rownames(tp) <- ens2hgnc[ rownames(tp)]
+  ha <- HeatmapAnnotation( df=df[colnames(tp),c("studyGroup","donorID")], col=cols[c("studyGroup","donorID")])
+  height <- 4+0.15*nrow(tp)
+  pdf( paste0("../../data/2026-06-04/",gsub("\n","_",comp),"_heatmap.pdf"), width=6.5,height=height)
+  p <- Heatmap(tp,show_column_names=FALSE,top_annotation=ha, name="scaled\nlog\nexpression", column_title=paste0("T1D vs. Control, ", length(sigs)," genes\n",ctype), column_split = df$studyGroup,row_split=genes[,2])
+  print(p)
+  dev.off()
+}
+
+# This function will get the up and down genes separately for each 
+# set of genes in the geneLists list that came from Karen's spreadsheet
+getGeneLists <- function(annoName){
+  geneAnno <- geneLists[[annoName]]
+  annos <- unique(geneAnno$anno)
+  genelists <- lapply(annos, function(a) geneAnno$ens[ geneAnno$anno == a])
+  names(genelists) <- paste0( annoName, "_", annos)
+  return(genelists)
+}
+geneSets <- do.call( c, lapply( names(geneLists), function(nam) getGeneLists(nam) ) )
+# Generate z-scores for the cells for those genesv
+pseudobulkDataDonorCluster <- readRDS("DonorClusterPseudobulk.RDS")
+bulk_pc_norm <- pseudobulkDataDonorCluster$bulk_pc_norm
+designBulk <- pseudobulkDataDonorCluster$designBulk
+setExpressions <- sapply( geneSets, function(ens) rowMeans( scale(t(log2(1+bulk_pc_norm[ens[ens %in% rownames(bulk_pc_norm)], ]))) ) )
+for( setname in colnames(setExpressions) ){
+  designBulk$setExpression <- setExpressions[rownames(designBulk),setname]
+  ctype <- strsplit( gsub("\n","_",setname),"_")[[1]]
+  sn <- ctype[[1]]
+  direction <- ctype[length(ctype)]
+  ctype <- ctype[length(ctype)-1]
+  print( paste(setname, ctype))
+  
+  designBulk$anno <- gsub("Control","HC",gsub( ctype,"",paste0( designBulk$cluster,"\n",designBulk$studyGroup)))
+  subdf <- designBulk[ designBulk$type== ctype,]
+  p <- ggplot( subdf, aes(x=anno,y=setExpression)) + geom_boxplot(outlier.color=NA) + geom_quasirandom(aes(color=studyGroup)) + scale_color_manual( values=groupCols) + guides(color="none") + labs(x="",title=paste0(sn,", ",ctype,"\nT1D ",direction), y="mean z-score log expression")
+  png(paste0("../../data/2026-06-04/",gsub("\n","_",setname),"_boxplots.png"),width=500,height=500)
+  print(p)
+  dev.off()
+  clusters <- unique(subdf$cluster)
+  pvals <- sapply(clusters, function(clust) oneway.test(setExpression ~ studyGroup, data=subdf[subdf$cluster == clust,])$p.value); names(pvals) <- clusters
+  # print(pvals)
+  # print( any( p.adjust(pvals,method="BH") <= 0.05))
+  if( any( pvals <= 0.05) ){
+    print(pvals)
+  }
+
+}
+
+## 06/28/26 Compute DE for the different sorts
+pseudobulkDataDonorSort <- readRDS("DonorSortPseudobulk.RDS")
+bulk_pc_norm <- pseudobulkDataDonorSort$bulk_pc_norm
+designBulk <- pseudobulkDataDonorSort$designBulk
+setExpressions <- sapply( geneSets, function(ens) rowMeans( scale(t(log2(1+bulk_pc_norm[ens[ens %in% rownames(bulk_pc_norm)], ]))) ) )
+pvals <- c()
+for( setname in colnames(setExpressions) ){
+  designBulk$setExpression <- setExpressions[rownames(designBulk),setname]
+  ctype <- strsplit( gsub("\n","_",setname),"_")[[1]]
+  sn <- ctype[[1]]
+  direction <- ctype[length(ctype)]
+  ctype <- ctype[length(ctype)-1]
+  print( paste(setname, ctype))
+  
+  subdf <- designBulk[ designBulk$type== gsub("Tconv","Tconventional",ctype),]
+  pval <- oneway.test(setExpression ~ studyGroup, data=subdf)$p.value
+  p <- ggplot( subdf, aes(x=studyGroup,y=setExpression)) + geom_boxplot(outlier.color=NA) + geom_quasirandom(aes(color=studyGroup)) + scale_color_manual( values=groupCols) + guides(color="none") + labs(x="",title=paste0(sn,", ",ctype,"\nT1D ",direction,"\np: ",signif(pval,3)), y="mean z-score log expression")
+  png(paste0("../../data/2026-06-04/",gsub("\n","_",setname),"_",ctype,"_boxplots.png"),width=350,height=500)
+  print(p)
+  dev.off()
+  pvals[setname] <- pval
+
+}
+pvals <- pvals[order(pvals)]
+pvalDf <- data.frame(P.Value=pvals,adj.P.Val=p.adjust(pvals,method="BH"))
+print(pvalDf)
+### Also do roasts
+tregT1DRoast_t1dGenesets <- roast(
+      y=vwts,
+      index=ids2indices(geneSets, identifiers=rownames(vwts)),
+      design=design_mat,
+      contrast= cont.matrix[,1],
+      nrot = 8000)
+tconvT1DRoast_t1dGenesets <- roast(
+      y=vwts,
+      index=ids2indices(geneSets, identifiers=rownames(vwts)),
+      design=design_mat,
+      contrast= cont.matrix[,2],
+      nrot = 8000)
+
+## 06/15/2026
+markers <- c("PDCD1","LAG3","HAVCR2","IFNG","PRDM1","SGK1","BCL3","PIM3","SETD7","RHBDD2","TIGIT")
+soTregs@meta.data$clusterStudyGroup <- factor( paste0( soTregs@meta.data$seurat_clusters, "_",soTregs@meta.data$studyGroup) )
+pdf( paste0("../../data/2026-06-04/Curated_TregT1DvHCGene_dotplot.pdf"), width=7,height=3)
+DotPlot(soTregs, features = markers, group.by="clusterStudyGroup") +
+      theme(axis.text.x = element_text(angle = 60, hjust = 1, size = 8),
+        text = element_text(size = fontSize),
+        axis.text.y = element_text(size = fontSize),
+        axis.title.y = element_text(size = fontSize),
+        legend.text = element_text(size = fontSize),
+        legend.title = element_text(size = fontSize),
+        strip.text = element_text(size = fontSize),
+        plot.title = element_text(size = fontSize)) + labs(title="Treg T1D vs HC Markers") + scale_color_gradient2(low = "blue", mid = "white", high = "red")
+dev.off()
+
+ens <- rownames(bulk_pc_norm)[ ens2hgnc[rownames(bulk_pc_norm)] %in% markers]
+
+tregDE <- t1dDE[["Treg"]]
+sigs <- ens
+df <- designBulk[ designBulk$type == "Treg",]
+df$clusterGroup <- paste0( df$cluster, "\n", df$studyGroup)
+df <- df[ order(df$studyGroup,df$donorID),]
+cols <- lapply( df, function(col) make_colors(unique(col)) )
+tp <- t(scale(t(log2(1+bulk_pc_norm[sigs,rownames(df)]))))
+rownames(tp) <- ens2hgnc[ rownames(tp)]
+tp <- tp[ !apply(tp,1,function(r) any(is.na(r))),]
+cols$studyGroup <- groupCols
+ha <- HeatmapAnnotation( df=df[colnames(tp),c("studyGroup","donorID")], col=cols[c("studyGroup","donorID")])
+pdf( paste0("../../data/2026-06-04/Curated_TregT1DvHCGene_heatmap.pdf"), width=12,height=4)
+p <- Heatmap(tp,show_column_names=FALSE,top_annotation=ha, name="scaled\nlog\nexpression", cluster_columns=FALSE, column_split=df$clusterGroup)
+print(p)
+dev.off()
+
+libs <- c("lib81267","lib81186")
+donor <- design_qc[libs,"donorId"][1]
+ggplot( design_qc[ design_qc$donorId == donor,], aes(x=meanThSet,y=meanTregSet,color=sort,shape=libid %in% libs, size=libid %in% libs)) + geom_point() + scale_shape_manual( values=c(4,16)) + scale_size_manual(values=c(0.5,5)) + geom_line( data=design_qc[libs,], aes(x=meanThSet,y=meanTregSet,group=donorId),size=1) + labs(title=paste(libs,collapse=", "), color="Treg\nTconv\nSharing") + guides(shape="none")
+
+matchLibList <- list()
+matchLibList[[1]] <- list("Treg"=c("lib81267"), "Tconv"=c("lib81186") )
+matchLibList[[2]] <- list("Treg"=c("lib81215","lib81216","lib81222","lib81240","lib81244","lib81258","lib81280"), "Tconv"=c("lib81114") )
+md <- so@meta.data
+for( i in 1:length(matchLibList) ){
+  libs <- do.call( c, matchLibList[[i]] )
+  subdf <- md[ md$libid %in% libs,]
+  print( table( subdf$mismatched, subdf$sort) )
+}
+
+tableS10 <- read_xlsx("../../../Treg manuscript/JCI Insight/Cerosaletti Treg MS SUPP Table S10_Plate-sort TCRs FINAL 030426.xlsx"); colnames(tableS10) <- tableS10[1,]; tableS10 <- tableS10[ 2:nrow(tableS10),]
+subtableS10 <- tableS10[ tableS10$libid %in% c( soTregs$libid, soTconvs$libid),]
+write.table(subtableS10, "../../../Treg manuscript/JCI Insight/Cerosaletti Treg MS SUPP Table S10_Plate-sort TCRs 062226.tsv", sep="\t", col.names=TRUE,quote=FALSE,row.names=FALSE )
+
+```
